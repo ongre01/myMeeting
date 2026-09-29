@@ -11,10 +11,12 @@ win32:CONFIG += windows
 
 SOURCES += \
     main.cpp \
-    mainwindow.cpp
+    mainwindow.cpp \
+    meetingstorage.cpp
 
 HEADERS += \
-    mainwindow.h
+    mainwindow.h \
+    meetingstorage.h
 
 FORMS += \
     mainwindow.ui
