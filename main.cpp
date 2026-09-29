@@ -1,11 +1,20 @@
 #include "mainwindow.h"
 
 #include <QApplication>
+#include <QCoreApplication>
 
 int main(int argc, char *argv[])
 {
-    QApplication a(argc, argv);
-    MainWindow w;
-    w.show();
-    return QApplication::exec();
+    QApplication application(argc, argv);
+
+    QCoreApplication::setOrganizationName(QStringLiteral("Local Meeting Minutes"));
+    QCoreApplication::setApplicationName(QStringLiteral("myMeeting"));
+    QCoreApplication::setApplicationVersion(QStringLiteral("0.1.0"));
+    QApplication::setApplicationDisplayName(
+        QStringLiteral("Local Meeting Minutes Assistant"));
+
+    MainWindow mainWindow;
+    mainWindow.show();
+
+    return application.exec();
 }

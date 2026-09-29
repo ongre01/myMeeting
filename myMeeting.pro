@@ -1,10 +1,13 @@
-QT += widgets
+QT += core gui widgets
+
+TEMPLATE = app
+TARGET = myMeeting
 
 CONFIG += c++17
+win32:CONFIG += windows
 
-# You can make your code fail to compile if it uses deprecated APIs.
-# In order to do so, uncomment the following line.
-#DEFINES += QT_DISABLE_DEPRECATED_BEFORE=0x060000    # disables all the APIs deprecated before Qt 6.0.0
+!equals(QT_MAJOR_VERSION, 6): error("myMeeting requires Qt 6.x.")
+!win32: error("myMeeting supports Windows 10/11 only.")
 
 SOURCES += \
     main.cpp \
@@ -15,8 +18,3 @@ HEADERS += \
 
 FORMS += \
     mainwindow.ui
-
-# Default rules for deployment.
-qnx: target.path = /tmp/$${TARGET}/bin
-else: unix:!android: target.path = /opt/$${TARGET}/bin
-!isEmpty(target.path): INSTALLS += target
