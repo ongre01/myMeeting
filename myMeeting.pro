@@ -1,4 +1,4 @@
-QT += core gui widgets
+QT += core gui widgets multimedia
 
 TEMPLATE = app
 TARGET = myMeeting
@@ -12,11 +12,15 @@ win32:CONFIG += windows
 SOURCES += \
     main.cpp \
     mainwindow.cpp \
-    meetingstorage.cpp
+    meetingstorage.cpp \
+    audiorecorder.cpp \
+    wavfilewriter.cpp
 
 HEADERS += \
     mainwindow.h \
-    meetingstorage.h
+    meetingstorage.h \
+    audiorecorder.h \
+    wavfilewriter.h
 
 FORMS += \
     mainwindow.ui

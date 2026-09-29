@@ -1,4 +1,4 @@
-QT += core gui widgets testlib
+QT += core gui widgets multimedia testlib
 
 TEMPLATE = app
 TARGET = tst_appshell
@@ -13,11 +13,15 @@ INCLUDEPATH += ..
 SOURCES += \
     tst_appshell.cpp \
     ../mainwindow.cpp \
-    ../meetingstorage.cpp
+    ../meetingstorage.cpp \
+    ../audiorecorder.cpp \
+    ../wavfilewriter.cpp
 
 HEADERS += \
     ../mainwindow.h \
-    ../meetingstorage.h
+    ../meetingstorage.h \
+    ../audiorecorder.h \
+    ../wavfilewriter.h
 
 FORMS += \
     ../mainwindow.ui
