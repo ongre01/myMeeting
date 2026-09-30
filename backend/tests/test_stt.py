@@ -59,6 +59,52 @@ class SpeechToTextTest(unittest.TestCase):
             wav_file.setframerate(sample_rate)
             wav_file.writeframes(raw_frames)
 
+    @staticmethod
+    def _write_float_wav(
+        path: Path,
+        samples: tuple[float, ...],
+        *,
+        extensible: bool,
+        channels: int = 1,
+        sample_rate: int = 48_000,
+    ) -> None:
+        raw_frames = struct.pack(f"<{len(samples)}f", *samples)
+        block_align = channels * 4
+        if extensible:
+            format_payload = struct.pack(
+                "<HHIIHHHHI",
+                0xFFFE,
+                channels,
+                sample_rate,
+                sample_rate * block_align,
+                block_align,
+                32,
+                22,
+                32,
+                0,
+            ) + bytes.fromhex("0300000000001000800000aa00389b71")
+        else:
+            format_payload = struct.pack(
+                "<HHIIHH",
+                3,
+                channels,
+                sample_rate,
+                sample_rate * block_align,
+                block_align,
+                32,
+            )
+
+        payload = (
+            b"WAVE"
+            + b"fmt "
+            + struct.pack("<I", len(format_payload))
+            + format_payload
+            + b"data"
+            + struct.pack("<I", len(raw_frames))
+            + raw_frames
+        )
+        path.write_bytes(b"RIFF" + struct.pack("<I", len(payload)) + payload)
+
     def test_pcm_sample_widths_are_normalized_to_signed_16_bit(self) -> None:
         cases = (
             (1, bytes((0, 128, 255)), [-32768, 0, 32512]),
@@ -84,6 +130,21 @@ class SpeechToTextTest(unittest.TestCase):
 
                 self.assertEqual(audio.samples, expected)
                 self.assertEqual(audio.source_sample_width, sample_width)
+
+    def test_ieee_float_and_extensible_wav_are_normalized(self) -> None:
+        samples = (-1.0, -0.5, 0.0, 0.5, 1.0)
+        expected = [-32768, -16384, 0, 16384, 32767]
+
+        for extensible in (False, True):
+            with self.subTest(extensible=extensible):
+                path = self.root / f"float-{extensible}.wav"
+                self._write_float_wav(path, samples, extensible=extensible)
+
+                audio = load_and_normalize_wav(path)
+
+                self.assertEqual(audio.samples, expected)
+                self.assertEqual(audio.source_sample_width, 4)
+                self.assertEqual(audio.sample_rate, 48_000)
 
     def test_stereo_is_downmixed_and_original_sample_rate_is_forwarded(self) -> None:
         self._write_wav(
@@ -124,6 +185,32 @@ class SpeechToTextTest(unittest.TestCase):
 
         self.assertEqual(result.text, "짧은 발화")
         self.assertEqual(calls, [([1], 16_000)])
+
+    def test_extensible_float_uses_nobodywho_file_api(self) -> None:
+        self._write_float_wav(self.input_path, (0.25,), extensible=True)
+        calls: list[str] = []
+
+        class FileEngine:
+            def transcribe_file(self, path: str):
+                calls.append(path)
+                return _CompletedStream("float WAV 전사")
+
+            def transcribe_pcm(self, samples: list[int], sample_rate: int):
+                raise AssertionError(
+                    "transcribe_file을 지원하면 PCM fallback을 사용하면 안 됩니다."
+                )
+
+        result = transcribe_wav(
+            self.input_path,
+            model_source="local-whisper",
+            language="ko",
+            engine_factory=lambda **_: FileEngine(),
+        )
+
+        self.assertEqual(result.text, "float WAV 전사")
+        self.assertEqual(calls, [str(self.input_path)])
+        self.assertEqual(result.audio.samples, [])
+        self.assertFalse(result.skipped_silence)
 
     def test_regional_language_tag_is_normalized_for_whisper(self) -> None:
         self._write_wav(self.input_path, struct.pack("<h", 1))

@@ -300,6 +300,7 @@ private slots:
     void reportsAbnormalBackendExit();
     void rejectsMissingBackendOutput();
     void deliversBackendResultToMainWindow();
+    void importsStoredWavAndCreatesMinutes();
     void savesAndReloadsEditedTranscript();
     void reanalyzesUsingEditedTranscript();
     void blocksEmptyTranscriptAnalysis();
@@ -338,6 +339,8 @@ void AppShellTest::createsRecordingMainWindow()
                 QStringLiteral("startRecordingButton"))->isEnabled());
     QVERIFY(!window.findChild<QPushButton *>(
                  QStringLiteral("stopRecordingButton"))->isEnabled());
+    QVERIFY(window.findChild<QPushButton *>(
+                QStringLiteral("importWavButton"))->isEnabled());
 }
 
 void AppShellTest::disablesRecordingWhenNoMicrophoneExists()
@@ -351,12 +354,15 @@ void AppShellTest::disablesRecordingWhenNoMicrophoneExists()
         QStringLiteral("deviceComboBox"));
     auto *startButton = window.findChild<QPushButton *>(
         QStringLiteral("startRecordingButton"));
+    auto *importButton = window.findChild<QPushButton *>(
+        QStringLiteral("importWavButton"));
     auto *statusLabel = window.findChild<QLabel *>(QStringLiteral("statusLabel"));
 
     QCOMPARE(deviceComboBox->currentText(),
              QStringLiteral("사용 가능한 마이크 없음"));
     QVERIFY(!deviceComboBox->isEnabled());
     QVERIFY(!startButton->isEnabled());
+    QVERIFY(importButton->isEnabled());
     QCOMPARE(statusLabel->text(),
              QStringLiteral("마이크를 찾을 수 없습니다."));
 }
@@ -372,6 +378,8 @@ void AppShellTest::recordsWavFromMainWindowButtons()
         QStringLiteral("startRecordingButton"));
     auto *stopButton = window.findChild<QPushButton *>(
         QStringLiteral("stopRecordingButton"));
+    auto *importButton = window.findChild<QPushButton *>(
+        QStringLiteral("importWavButton"));
     auto *statusLabel = window.findChild<QLabel *>(QStringLiteral("statusLabel"));
 
     titleEdit->setText(QStringLiteral("주간 회의"));
@@ -381,6 +389,7 @@ void AppShellTest::recordsWavFromMainWindowButtons()
     QCOMPARE(statusLabel->text(), QStringLiteral("녹음 중"));
     QVERIFY(!startButton->isEnabled());
     QVERIFY(stopButton->isEnabled());
+    QVERIFY(!importButton->isEnabled());
     QVERIFY(!titleEdit->isEnabled());
 
     stopButton->click();
@@ -389,6 +398,7 @@ void AppShellTest::recordsWavFromMainWindowButtons()
     QCOMPARE(statusLabel->text(), QStringLiteral("녹음 완료"));
     QVERIFY(startButton->isEnabled());
     QVERIFY(!stopButton->isEnabled());
+    QVERIFY(importButton->isEnabled());
     QVERIFY(titleEdit->isEnabled());
 
     const QStringList directories = QDir(temporaryDirectory.path()).entryList(
@@ -852,6 +862,78 @@ void AppShellTest::deliversBackendResultToMainWindow()
     const QDir meetingDirectory(root.filePath(meetingDirectories.first()));
     QVERIFY(QFileInfo::exists(meetingDirectory.filePath(QStringLiteral("transcript.txt"))));
     QVERIFY(QFileInfo::exists(meetingDirectory.filePath(QStringLiteral("meeting.json"))));
+}
+
+void AppShellTest::importsStoredWavAndCreatesMinutes()
+{
+    const QString python = pythonExecutable();
+    if (python.isEmpty()) {
+        QSKIP("Python 실행 파일이 없어 WAV 불러오기 통합 테스트를 건너뜁니다.");
+    }
+
+    QTemporaryDir temporaryDirectory;
+    QVERIFY(temporaryDirectory.isValid());
+    const QDir root(temporaryDirectory.path());
+    const QString sourcePath = root.filePath(QStringLiteral("saved-meeting.WAV"));
+    const QByteArray sourceContents("RIFF stored wav placeholder");
+    QVERIFY(writeTextFile(sourcePath, sourceContents));
+    const QString invalidPath = root.filePath(QStringLiteral("not-a-wav.txt"));
+    QVERIFY(writeTextFile(invalidPath, QByteArrayLiteral("not wav")));
+
+    const QString scriptPath = root.filePath(QStringLiteral("fake_backend.py"));
+    QVERIFY(writeTextFile(scriptPath, successfulBackendScript()));
+
+    FakeAudioRecorder recorder;
+    AiBackendClient backendClient(python, scriptPath);
+    MainWindow window(&recorder, &backendClient, temporaryDirectory.path());
+    auto *importButton = window.findChild<QPushButton *>(
+        QStringLiteral("importWavButton"));
+    auto *wavPathEdit = window.findChild<QLineEdit *>(
+        QStringLiteral("wavPathEdit"));
+    auto *generateButton = window.findChild<QPushButton *>(
+        QStringLiteral("generateMinutesButton"));
+    auto *statusLabel = window.findChild<QLabel *>(QStringLiteral("statusLabel"));
+    QSignalSpy completedSpy(&backendClient, &AiBackendClient::completed);
+
+    QVERIFY(importButton->isEnabled());
+    QVERIFY(!generateButton->isEnabled());
+    QVERIFY(QMetaObject::invokeMethod(
+        &window,
+        "importWavFile",
+        Qt::DirectConnection,
+        Q_ARG(QString, invalidPath)));
+    QVERIFY(root.entryList(QDir::Dirs | QDir::NoDotAndDotDot).isEmpty());
+    QCOMPARE(statusLabel->text(), QStringLiteral("오류: WAV 불러오기 실패"));
+    QVERIFY(!generateButton->isEnabled());
+
+    QVERIFY(QMetaObject::invokeMethod(
+        &window,
+        "importWavFile",
+        Qt::DirectConnection,
+        Q_ARG(QString, sourcePath)));
+
+    QCOMPARE(wavPathEdit->text(), QDir::toNativeSeparators(sourcePath));
+    QCOMPARE(statusLabel->text(), QStringLiteral("WAV 불러오기 완료"));
+    QVERIFY(generateButton->isEnabled());
+
+    const QStringList meetingDirectories = root.entryList(
+        QDir::Dirs | QDir::NoDotAndDotDot);
+    QCOMPARE(meetingDirectories.size(), 1);
+    const QDir meetingDirectory(root.filePath(meetingDirectories.first()));
+    const QString importedWavPath = meetingDirectory.filePath(
+        QStringLiteral("meeting.wav"));
+    QCOMPARE(readFile(importedWavPath), sourceContents);
+    QCOMPARE(readFile(sourcePath), sourceContents);
+
+    generateButton->click();
+    QVERIFY(!importButton->isEnabled());
+    QTRY_COMPARE_WITH_TIMEOUT(completedSpy.count(), 1, 5000);
+    QVERIFY(importButton->isEnabled());
+    QVERIFY(QFileInfo::exists(
+        meetingDirectory.filePath(QStringLiteral("transcript.txt"))));
+    QVERIFY(QFileInfo::exists(
+        meetingDirectory.filePath(QStringLiteral("meeting.json"))));
+    QCOMPARE(readFile(sourcePath), sourceContents);
 }
 
 void AppShellTest::savesAndReloadsEditedTranscript()

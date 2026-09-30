@@ -4,26 +4,28 @@
 
 ## 구현 범위
 
-- `backend/stt.py`에 PCM WAV 검증, mono 16-bit 정규화, NobodyWho Whisper 호출, UTF-8 Transcript 저장을 구현했다.
+- `backend/stt.py`에 비압축 PCM/IEEE float WAV 검증, mono 16-bit 정규화, NobodyWho Whisper 호출, UTF-8 Transcript 저장을 구현했다.
 - `backend/main.py`가 입력과 설정을 검증한 뒤 STT를 실행하고 `transcript.txt`를 저장한다.
-- NobodyWho Python API는 3.0.0 기준 `SpeechToText(source=..., language=...)`와 `transcribe_pcm(...).completed()`를 사용한다.
+- NobodyWho Python API는 3.0.0 기준 `SpeechToText(source=..., language=...)`와 `transcribe_file(...).completed()`를 우선 사용한다. 파일 API가 없는 테스트/호환 어댑터는 `transcribe_pcm(...)`으로 대체한다.
 - 설정의 `ko-KR` 같은 지역 언어 태그는 NobodyWho가 요구하는 ISO 639-1 기본 코드 `ko`로 정규화한다.
 - Python 의존성은 재현 가능한 설치를 위해 `nobodywho==3.0.0`으로 고정했다.
 - 회의 음성이나 Transcript를 외부 AI API로 전송하는 코드는 없다. `hf://` 모델을 처음 사용할 때는 모델 파일만 Hugging Face에서 내려받아 로컬 캐시에 저장한다.
 
 ## WAV 처리
 
-입력은 비압축 PCM WAV여야 한다. RIFF/WAV 헤더와 실제 오디오 길이를 확인하고 다음 입력을 mono signed 16-bit PCM으로 변환한다.
+입력은 비압축 PCM 또는 IEEE float RIFF/WAV여야 한다. 표준 포맷 태그와 `WAVE_FORMAT_EXTENSIBLE` 서브포맷 GUID, RIFF 청크 경계, 실제 오디오 길이를 확인한다. NobodyWho 3.0의 파일 API가 있으면 검증한 WAV 경로를 직접 전달해 장시간 녹음을 거대한 Python 정수 리스트로 만들지 않는다. 파일 API가 없는 호환 어댑터에서는 다음 규칙으로 mono signed 16-bit PCM을 생성한다.
 
 | 입력 | 처리 |
 |---|---|
 | PCM 8/16/24/32-bit | signed 16-bit 범위로 변환 |
+| IEEE float 32/64-bit | `[-1.0, 1.0]`을 signed 16-bit 범위로 변환 |
+| `WAVE_FORMAT_EXTENSIBLE` PCM/IEEE float | 서브포맷 GUID를 해석해 해당 PCM/float 규칙 적용 |
 | 다채널 | 채널 평균으로 mono downmix |
 | 임의 샘플레이트 | 원래 샘플레이트와 PCM을 NobodyWho에 전달; Whisper 입력 리샘플링은 NobodyWho가 수행 |
 | 빈 WAV 또는 완전한 디지털 무음 | 모델을 로드하지 않고 빈 Transcript 저장 |
 | 1 프레임 이상의 비무음 WAV | 길이에 상관없이 STT 실행 |
 
-손상된 헤더, 잘린 오디오 데이터, 압축 WAV, 지원하지 않는 샘플 폭은 입력 오류로 처리한다. Python 스택 트레이스는 CLI에 노출하지 않는다.
+손상된 헤더, 잘린 오디오 데이터, 압축 WAV, RF64, 지원하지 않는 샘플 폭이나 extensible 서브포맷은 입력 오류로 처리한다. Python 스택 트레이스는 CLI에 노출하지 않는다.
 
 ## 실행 방법
 
@@ -106,7 +108,8 @@ python -m compileall -q backend
 테스트는 다음을 포함한다.
 
 - 한국어 문자열을 반환하는 NobodyWho 호환 어댑터를 통한 CLI 전체 경로와 UTF-8 파일 저장
-- 8/16/24/32-bit PCM 변환, stereo downmix, 48 kHz 전달
+- 8/16/24/32-bit PCM과 32-bit IEEE float 변환, `WAVE_FORMAT_EXTENSIBLE` float 해석, stereo downmix, 48 kHz 전달
+- NobodyWho 파일 전사 API 우선 사용과 PCM-only 호환 어댑터 fallback
 - 1 프레임 비무음 입력과 빈/무음 입력
 - 손상 및 잘린 WAV
 - 모델 로딩과 추론 오류, 비문자열 결과
@@ -127,3 +130,14 @@ python -m compileall -q backend
 - Debug/Release 앱이 즉시 종료하지 않고 이벤트 루프에 진입함
 
 실제 종단 검증에 사용한 합성 WAV, 임시 패키지 복사본, 출력 파일은 검증 후 삭제했다. NobodyWho가 사용하는 모델 캐시는 임시 검증 파일 정리 대상에 포함하지 않았다.
+
+### 저장된 float WAV 호환성 보강
+
+2026-09-30 실제 48 kHz mono, 32-bit IEEE float, `WAVE_FORMAT_EXTENSIBLE` WAV에서 다음을 추가 확인했다.
+
+- 원본과 앱이 회의 폴더로 복사한 `meeting.wav`의 SHA-256 일치
+- 4,806.164초/230,695,872 프레임을 전체 PCM 리스트로 읽지 않고 헤더와 비무음 상태 확인
+- 캐시된 NobodyWho 3.0.0 `whisper-base`와 짧은 로컬 float32 WAV를 사용한 `transcribe_file()` 성공
+- Python `unittest` 49건 통과 및 `compileall` 성공
+
+검증용 짧은 WAV는 확인 후 삭제했으며 전사 내용은 로그나 문서에 기록하지 않았다.

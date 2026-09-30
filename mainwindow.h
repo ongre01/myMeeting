@@ -44,6 +44,8 @@ private slots:
     void refreshInputDevices();
     void startRecording();
     void stopRecording();
+    void selectWavFile();
+    void importWavFile(const QString &filePath);
     void handleRecordingStarted();
     void handleRecordingStopped(const QString &filePath);
     void handleRecordingError(const QString &message);
@@ -81,6 +83,7 @@ private:
     static QString defaultMeetingsRoot();
     void initialize();
     void setRecordingControls(bool recording);
+    void showWavImportError(const QString &message);
     void discardUnusedMeeting();
     bool saveTranscriptToDisk(QString *errorMessage);
     bool loadTranscriptFromDisk(const QString &path, QString *errorMessage);

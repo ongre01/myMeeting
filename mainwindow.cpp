@@ -6,6 +6,7 @@
 #include <QDateTime>
 #include <QDir>
 #include <QFile>
+#include <QFileDialog>
 #include <QFileInfo>
 #include <QHeaderView>
 #include <QLineEdit>
@@ -127,6 +128,8 @@ void MainWindow::initialize()
             this, &MainWindow::startRecording);
     connect(ui->stopRecordingButton, &QPushButton::clicked,
             this, &MainWindow::stopRecording);
+    connect(ui->importWavButton, &QPushButton::clicked,
+            this, &MainWindow::selectWavFile);
     connect(ui->generateMinutesButton, &QPushButton::clicked,
             this, &MainWindow::startBackendProcessing);
     connect(ui->saveTranscriptButton, &QPushButton::clicked,
@@ -195,7 +198,8 @@ void MainWindow::initialize()
     ui->backendProgressBar->setValue(0);
     clearMinutesEditor();
     refreshInputDevices();
-    statusBar()->showMessage(QStringLiteral("로컬 녹음만 사용합니다."));
+    statusBar()->showMessage(
+        QStringLiteral("회의를 녹음하거나 로컬 WAV 파일을 불러오세요."));
 }
 
 void MainWindow::refreshInputDevices()
@@ -279,12 +283,103 @@ void MainWindow::stopRecording()
     m_audioRecorder->stopRecording();
 }
 
+void MainWindow::selectWavFile()
+{
+    if (m_audioRecorder->isRecording() || m_aiBackendClient->isRunning()) {
+        statusBar()->showMessage(
+            QStringLiteral("녹음 또는 AI 작업이 끝난 뒤 WAV 파일을 불러오세요."));
+        return;
+    }
+
+    const QString filePath = QFileDialog::getOpenFileName(
+        this,
+        QStringLiteral("WAV 파일 불러오기"),
+        QString(),
+        QStringLiteral("WAV 파일 (*.wav *.WAV)"));
+    if (!filePath.isEmpty()) {
+        importWavFile(filePath);
+    }
+}
+
+void MainWindow::importWavFile(const QString &filePath)
+{
+    if (m_audioRecorder->isRecording() || m_aiBackendClient->isRunning()) {
+        showWavImportError(
+            QStringLiteral("녹음 또는 AI 작업 중에는 WAV 파일을 불러올 수 없습니다."));
+        return;
+    }
+
+    const QFileInfo sourceInfo(filePath);
+    if (!sourceInfo.exists() || !sourceInfo.isFile()) {
+        showWavImportError(QStringLiteral("WAV 파일을 찾을 수 없습니다: %1")
+                               .arg(QDir::toNativeSeparators(filePath)));
+        return;
+    }
+    if (sourceInfo.suffix().compare(QStringLiteral("wav"),
+                                    Qt::CaseInsensitive) != 0) {
+        showWavImportError(QStringLiteral(".wav 파일만 불러올 수 있습니다."));
+        return;
+    }
+
+    QFile sourceFile(sourceInfo.absoluteFilePath());
+    if (!sourceFile.open(QIODevice::ReadOnly)) {
+        showWavImportError(
+            QStringLiteral("WAV 파일을 읽을 수 없습니다: %1")
+                .arg(sourceFile.errorString()));
+        return;
+    }
+    sourceFile.close();
+
+    const QString meetingTitle = ui->titleEdit->text().trimmed().isEmpty()
+                                     ? sourceInfo.completeBaseName()
+                                     : ui->titleEdit->text();
+    const MeetingStorage::Result result = m_storage.createMeeting(
+        meetingTitle, QDateTime::currentDateTime());
+    if (!result.succeeded()) {
+        showWavImportError(result.errorMessage);
+        return;
+    }
+
+    if (!sourceFile.copy(result.paths.wav)) {
+        const QString errorMessage = sourceFile.errorString();
+        QFile::remove(result.paths.wav);
+        QDir().rmdir(result.paths.directory);
+        showWavImportError(
+            QStringLiteral("WAV 파일을 회의 폴더로 복사할 수 없습니다: %1")
+                .arg(errorMessage));
+        return;
+    }
+
+    m_lastMeetingDirectory = result.paths.directory;
+    m_lastRecordingPath = result.paths.wav;
+    m_lastTranscriptPath.clear();
+    m_currentMinutesPath.clear();
+    ui->transcriptEdit->clear();
+    clearMinutesEditor();
+    ui->wavPathEdit->setText(
+        QDir::toNativeSeparators(sourceInfo.absoluteFilePath()));
+    ui->wavPathEdit->setToolTip(
+        QDir::toNativeSeparators(sourceInfo.absoluteFilePath()));
+    ui->statusLabel->setText(QStringLiteral("WAV 불러오기 완료"));
+    ui->elapsedTimeLabel->setText(QStringLiteral("00:00:00"));
+    ui->backendStatusLabel->setText(QStringLiteral("Idle — 대기 중"));
+    ui->backendMessageLabel->clear();
+    ui->backendProgressBar->setRange(0, 1);
+    ui->backendProgressBar->setValue(0);
+    setRecordingControls(false);
+    statusBar()->showMessage(
+        QStringLiteral("WAV 불러오기 완료: %1")
+            .arg(QDir::toNativeSeparators(sourceInfo.absoluteFilePath())));
+}
+
 void MainWindow::handleRecordingStarted()
 {
     m_recordingStarted = true;
     m_lastMeetingDirectory.clear();
     m_lastRecordingPath.clear();
     m_lastTranscriptPath.clear();
+    ui->wavPathEdit->clear();
+    ui->wavPathEdit->setToolTip(QString());
     ui->transcriptEdit->clear();
     clearMinutesEditor();
     m_elapsedClock.restart();
@@ -309,6 +404,8 @@ void MainWindow::handleRecordingStopped(const QString &filePath)
         m_elapsedClock.isValid() ? m_elapsedClock.elapsed() : -1);
     m_lastRecordingPath = QFileInfo(filePath).absoluteFilePath();
     m_lastMeetingDirectory = QFileInfo(filePath).absolutePath();
+    ui->wavPathEdit->setText(QDir::toNativeSeparators(m_lastRecordingPath));
+    ui->wavPathEdit->setToolTip(QDir::toNativeSeparators(m_lastRecordingPath));
     ui->statusLabel->setText(QStringLiteral("녹음 완료"));
     setRecordingControls(false);
     statusBar()->showMessage(
@@ -374,6 +471,7 @@ void MainWindow::setRecordingControls(bool recording)
     ui->refreshDevicesButton->setEnabled(!recording && !backendRunning);
     ui->startRecordingButton->setEnabled(!recording && !backendRunning && hasDevice);
     ui->stopRecordingButton->setEnabled(recording);
+    ui->importWavButton->setEnabled(!recording && !backendRunning);
     const bool hasTranscript = !m_lastTranscriptPath.isEmpty();
     ui->transcriptEdit->setEnabled(!recording && !backendRunning && hasTranscript);
     ui->saveTranscriptButton->setEnabled(!recording && !backendRunning && hasTranscript);
@@ -388,6 +486,13 @@ void MainWindow::setRecordingControls(bool recording)
             ? QStringLiteral("수정본으로 다시 분석")
             : QStringLiteral("AI 회의록 생성"));
     setMinutesEditorEnabled(!recording && !backendRunning && m_hasCurrentMinutes);
+}
+
+void MainWindow::showWavImportError(const QString &message)
+{
+    ui->statusLabel->setText(QStringLiteral("오류: WAV 불러오기 실패"));
+    statusBar()->showMessage(message);
+    setRecordingControls(m_audioRecorder->isRecording());
 }
 
 void MainWindow::discardUnusedMeeting()
@@ -410,7 +515,8 @@ void MainWindow::startBackendProcessing()
         return;
     }
     if (m_lastRecordingPath.isEmpty() || m_lastMeetingDirectory.isEmpty()) {
-        handleBackendFailed(QStringLiteral("먼저 회의를 녹음해 주세요."));
+        handleBackendFailed(
+            QStringLiteral("먼저 회의를 녹음하거나 WAV 파일을 불러와 주세요."));
         return;
     }
 
