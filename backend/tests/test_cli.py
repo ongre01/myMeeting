@@ -51,6 +51,7 @@ class BackendCliTest(unittest.TestCase):
         *,
         input_path: Path | None = None,
         output_path: Path | None = None,
+        transcript_output_path: Path | None = None,
         config_path: Path | None = None,
         environment: dict[str, str] | None = None,
     ) -> subprocess.CompletedProcess[str]:
@@ -64,6 +65,8 @@ class BackendCliTest(unittest.TestCase):
             "--config",
             str(config_path or self.config_path),
         ]
+        if transcript_output_path is not None:
+            command.extend(["--transcript-output", str(transcript_output_path)])
         return subprocess.run(
             command,
             capture_output=True,
@@ -81,10 +84,15 @@ class BackendCliTest(unittest.TestCase):
 
         self.assertEqual(completed.returncode, ExitCode.SUCCESS, completed.stderr)
         response = json.loads(completed.stdout)
-        self.assertEqual(response["status"], "validated")
+        self.assertEqual(response["status"], "transcribed")
         self.assertEqual(Path(response["input"]), self.input_path.resolve())
         self.assertEqual(Path(response["output"]), self.output_path.resolve())
         self.assertEqual(response["language"], "ko")
+        self.assertTrue(response["silence"])
+        self.assertEqual(response["characters"], 0)
+        transcript_path = self.root / "transcript.txt"
+        self.assertEqual(Path(response["transcript_output"]), transcript_path)
+        self.assertEqual(transcript_path.read_bytes(), b"")
         self.assertFalse(self.output_path.exists())
 
     def test_default_config_is_relative_to_backend_not_working_directory(self) -> None:
@@ -123,6 +131,15 @@ class BackendCliTest(unittest.TestCase):
         self.assertEqual(completed.returncode, ExitCode.INPUT_ERROR)
         self.assertIn("WAV 형식", completed.stderr)
 
+    def test_corrupt_wav_returns_input_error_without_traceback(self) -> None:
+        self.input_path.write_bytes(b"not a wav")
+
+        completed = self._run_cli()
+
+        self.assertEqual(completed.returncode, ExitCode.INPUT_ERROR)
+        self.assertIn("손상", completed.stderr)
+        self.assertNotIn("Traceback", completed.stderr)
+
     def test_missing_output_directory_returns_output_error(self) -> None:
         completed = self._run_cli(
             output_path=self.root / "missing-directory" / "meeting.json"
@@ -136,6 +153,14 @@ class BackendCliTest(unittest.TestCase):
 
         self.assertEqual(completed.returncode, ExitCode.OUTPUT_ERROR)
         self.assertIn("JSON 형식", completed.stderr)
+
+    def test_invalid_transcript_output_returns_output_error(self) -> None:
+        completed = self._run_cli(
+            transcript_output_path=self.root / "transcript.json"
+        )
+
+        self.assertEqual(completed.returncode, ExitCode.OUTPUT_ERROR)
+        self.assertIn("TXT 형식", completed.stderr)
 
     def test_existing_output_file_is_validated_without_modification(self) -> None:
         original = b"existing meeting output"
@@ -175,6 +200,82 @@ class BackendCliTest(unittest.TestCase):
 
         self.assertEqual(completed.returncode, ExitCode.CONFIGURATION_ERROR)
         self.assertIn("외부 API 설정은 사용할 수 없습니다", completed.stderr)
+
+    def test_korean_transcript_is_written_through_nobodywho_adapter(self) -> None:
+        with wave.open(str(self.input_path), "wb") as wav_file:
+            wav_file.setnchannels(2)
+            wav_file.setsampwidth(2)
+            wav_file.setframerate(48_000)
+            wav_file.writeframes(b"\x10\x00\x20\x00")
+
+        fake_package = self.root / "fake-package"
+        fake_package.mkdir()
+        (fake_package / "nobodywho.py").write_text(
+            """
+class _Stream:
+    def completed(self):
+        return "오늘 CAN FD 통신 문제를 확인하겠습니다."
+
+class SpeechToText:
+    def __init__(self, *, source, language):
+        assert source == "local-whisper-model"
+        assert language == "ko"
+
+    def transcribe_pcm(self, samples, sample_rate):
+        assert samples == [24]
+        assert sample_rate == 48000
+        return _Stream()
+""".lstrip(),
+            encoding="utf-8",
+        )
+        transcript_path = self.root / "meeting-transcript.txt"
+        environment = os.environ.copy()
+        environment["PYTHONPATH"] = os.pathsep.join(
+            filter(None, (str(fake_package), environment.get("PYTHONPATH")))
+        )
+
+        completed = self._run_cli(
+            transcript_output_path=transcript_path,
+            environment=environment,
+        )
+
+        self.assertEqual(completed.returncode, ExitCode.SUCCESS, completed.stderr)
+        response = json.loads(completed.stdout)
+        self.assertEqual(response["status"], "transcribed")
+        self.assertFalse(response["silence"])
+        self.assertEqual(
+            transcript_path.read_text(encoding="utf-8"),
+            "오늘 CAN FD 통신 문제를 확인하겠습니다.\n",
+        )
+
+    def test_model_loading_error_returns_runtime_error_without_traceback(self) -> None:
+        with wave.open(str(self.input_path), "wb") as wav_file:
+            wav_file.setnchannels(1)
+            wav_file.setsampwidth(2)
+            wav_file.setframerate(16_000)
+            wav_file.writeframes(b"\x01\x00")
+
+        fake_package = self.root / "broken-package"
+        fake_package.mkdir()
+        (fake_package / "nobodywho.py").write_text(
+            """
+class SpeechToText:
+    def __init__(self, *, source, language):
+        raise RuntimeError("model files are missing")
+""".lstrip(),
+            encoding="utf-8",
+        )
+        environment = os.environ.copy()
+        environment["PYTHONPATH"] = os.pathsep.join(
+            filter(None, (str(fake_package), environment.get("PYTHONPATH")))
+        )
+
+        completed = self._run_cli(environment=environment)
+
+        self.assertEqual(completed.returncode, ExitCode.RUNTIME_ERROR)
+        self.assertIn("Whisper 모델을 불러오지 못했습니다", completed.stderr)
+        self.assertNotIn("Traceback", completed.stderr)
+        self.assertFalse((self.root / "transcript.txt").exists())
 
     def test_invalid_json_returns_configuration_error_without_traceback(self) -> None:
         self.config_path.write_text("{", encoding="utf-8")

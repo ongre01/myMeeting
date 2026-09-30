@@ -15,6 +15,15 @@ if __package__ in {None, ""}:
 
 from backend.configuration import ConfigurationError, ModelConfiguration
 from backend.configuration import load_model_configuration
+from backend.stt import (
+    ModelLoadError,
+    SttDependencyError,
+    TranscriptWriteError,
+    TranscriptionError,
+    WavInputError,
+    transcribe_wav,
+    write_transcript,
+)
 
 
 MINIMUM_PYTHON_VERSION = (3, 11)
@@ -45,7 +54,7 @@ def default_config_path() -> Path:
 
 def build_argument_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        description="로컬 회의 음성 처리 백엔드의 입력과 모델 설정을 검증합니다."
+        description="NobodyWho Whisper로 로컬 WAV를 Transcript로 변환합니다."
     )
     parser.add_argument("--input", required=True, type=Path, help="입력 WAV 경로")
     parser.add_argument("--output", required=True, type=Path, help="출력 JSON 경로")
@@ -54,6 +63,11 @@ def build_argument_parser() -> argparse.ArgumentParser:
         type=Path,
         default=default_config_path(),
         help="모델 설정 JSON 경로 (기본값: backend/config.json)",
+    )
+    parser.add_argument(
+        "--transcript-output",
+        type=Path,
+        help="Transcript TXT 경로 (기본값: 출력 JSON 폴더의 transcript.txt)",
     )
     return parser
 
@@ -142,6 +156,43 @@ def validate_output_path(path: Path) -> Path:
     return output_path
 
 
+def validate_transcript_output_path(path: Path) -> Path:
+    transcript_path = _absolute_path(path, "Transcript 출력", ExitCode.OUTPUT_ERROR)
+    if transcript_path.suffix.lower() != ".txt":
+        raise CliValidationError(
+            ExitCode.OUTPUT_ERROR,
+            f"Transcript 출력 파일은 TXT 형식이어야 합니다: {transcript_path}",
+        )
+
+    parent = transcript_path.parent
+    if not parent.exists():
+        raise CliValidationError(
+            ExitCode.OUTPUT_ERROR, f"Transcript 출력 폴더를 찾을 수 없습니다: {parent}"
+        )
+    if not parent.is_dir():
+        raise CliValidationError(
+            ExitCode.OUTPUT_ERROR,
+            f"Transcript 출력 상위 경로가 폴더가 아닙니다: {parent}",
+        )
+    if transcript_path.exists() and not transcript_path.is_file():
+        raise CliValidationError(
+            ExitCode.OUTPUT_ERROR,
+            f"Transcript 출력 경로가 파일이 아닙니다: {transcript_path}",
+        )
+    if transcript_path.exists():
+        try:
+            with transcript_path.open("r+b"):
+                pass
+        except OSError as error:
+            raise CliValidationError(
+                ExitCode.OUTPUT_ERROR,
+                f"Transcript 출력 파일에 쓸 수 없습니다: {transcript_path} ({error})",
+            ) from error
+
+    _verify_output_directory(parent)
+    return transcript_path
+
+
 def validate_configuration_path(path: Path) -> tuple[Path, ModelConfiguration]:
     config_path = _absolute_path(path, "설정", ExitCode.CONFIGURATION_ERROR)
     try:
@@ -180,16 +231,43 @@ def main(argv: Sequence[str] | None = None) -> int:
         input_path = validate_input_path(arguments.input)
         output_path = validate_output_path(arguments.output)
         config_path, configuration = validate_configuration_path(arguments.config)
+        requested_transcript_path = (
+            arguments.transcript_output
+            if arguments.transcript_output is not None
+            else output_path.with_name("transcript.txt")
+        )
+        transcript_path = validate_transcript_output_path(requested_transcript_path)
     except CliValidationError as error:
         print(f"오류: {error}", file=sys.stderr)
         return int(error.exit_code)
 
+    try:
+        transcription = transcribe_wav(
+            input_path,
+            model_source=configuration.stt_model,
+            language=configuration.language,
+        )
+        write_transcript(transcript_path, transcription.text)
+    except WavInputError as error:
+        print(f"오류: {error}", file=sys.stderr)
+        return int(ExitCode.INPUT_ERROR)
+    except TranscriptWriteError as error:
+        print(f"오류: {error}", file=sys.stderr)
+        return int(ExitCode.OUTPUT_ERROR)
+    except (SttDependencyError, ModelLoadError, TranscriptionError) as error:
+        print(f"오류: {error}", file=sys.stderr)
+        return int(ExitCode.RUNTIME_ERROR)
+
     result = {
-        "status": "validated",
+        "status": "transcribed",
         "input": str(input_path),
         "output": str(output_path),
+        "transcript_output": str(transcript_path),
         "config": str(config_path),
         "language": configuration.language,
+        "characters": len(transcription.text),
+        "audio_duration_seconds": round(transcription.audio.duration_seconds, 3),
+        "silence": transcription.skipped_silence,
     }
     print(json.dumps(result, ensure_ascii=False))
     return int(ExitCode.SUCCESS)

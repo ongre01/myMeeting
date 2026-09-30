@@ -1,2 +1,2 @@
-# TICKET-005 uses only the Python 3.11+ standard library.
-
+# NobodyWho 3.0 provides the local SpeechToText/Whisper ONNX runtime used here.
+nobodywho==3.0.0
