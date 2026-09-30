@@ -24,6 +24,15 @@
 
 ## 실행 파일과 스크립트 검색
 
+소스 트리에서 처음 실행하기 전에 프로젝트 전용 가상환경을 준비한다.
+
+```powershell
+python -m venv .venv
+.\.venv\Scripts\python.exe -m pip install -r backend\requirements.txt
+```
+
+설치 후 이미 실행 중인 앱은 종료하고 다시 시작해야 한다.
+
 기본 실행에서는 다음 순서로 Python과 백엔드 스크립트를 찾는다.
 
 1. `MYMEETING_PYTHON_EXECUTABLE`, `MYMEETING_BACKEND_SCRIPT` 환경 변수
