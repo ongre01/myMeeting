@@ -10,6 +10,7 @@ win32:CONFIG += windows
 !win32: error("myMeeting supports Windows 10/11 only.")
 
 SOURCES += \
+    applicationlog.cpp \
     aibackendclient.cpp \
     main.cpp \
     mainwindow.cpp \
@@ -20,6 +21,7 @@ SOURCES += \
     wavfilewriter.cpp
 
 HEADERS += \
+    applicationlog.h \
     aibackendclient.h \
     mainwindow.h \
     meetingexporter.h \

@@ -98,6 +98,8 @@ private:
     MeetingStorage m_storage;
     QTimer *m_elapsedTimer;
     QElapsedTimer m_elapsedClock;
+    QElapsedTimer m_backendClock;
+    QElapsedTimer m_backendPhaseClock;
     QString m_currentMeetingDirectory;
     QString m_currentWavPath;
     QString m_lastMeetingDirectory;
@@ -108,5 +110,7 @@ private:
     bool m_recordingStarted = false;
     bool m_hasCurrentMinutes = false;
     bool m_populatingMinutesEditor = false;
+    bool m_backendOperationActive = false;
+    AiBackendClient::State m_loggedBackendPhase = AiBackendClient::State::Idle;
 };
 #endif // MAINWINDOW_H

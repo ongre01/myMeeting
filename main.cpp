@@ -1,4 +1,5 @@
 #include "mainwindow.h"
+#include "applicationlog.h"
 
 #include <QApplication>
 #include <QCoreApplication>
@@ -13,8 +14,12 @@ int main(int argc, char *argv[])
     QApplication::setApplicationDisplayName(
         QStringLiteral("Local Meeting Minutes Assistant"));
 
+    ApplicationLog::initialize();
+
     MainWindow mainWindow;
     mainWindow.show();
 
-    return application.exec();
+    const int exitCode = application.exec();
+    ApplicationLog::shutdown();
+    return exitCode;
 }

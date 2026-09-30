@@ -1,4 +1,5 @@
 #include "aibackendclient.h"
+#include "applicationlog.h"
 #include "audiorecorder.h"
 #include "mainwindow.h"
 #include "meetingexporter.h"
@@ -18,6 +19,7 @@
 #include <QListWidget>
 #include <QPlainTextEdit>
 #include <QPushButton>
+#include <QSet>
 #include <QStandardPaths>
 #include <QStatusBar>
 #include <QTemporaryDir>
@@ -118,6 +120,7 @@ result = {
     "status": "completed",
     "output": str(Path(arguments.output).resolve()),
 }
+
 if arguments.transcript_output:
     result["transcript_output"] = str(Path(arguments.transcript_output).resolve())
 else:
@@ -125,6 +128,64 @@ else:
 print(json.dumps(result), flush=True)
 )PY";
 }
+
+QByteArray failOnceBackendScript()
+{
+    return R"PY(import argparse
+import json
+from pathlib import Path
+import sys
+
+parser = argparse.ArgumentParser()
+parser.add_argument("--input")
+parser.add_argument("--transcript-input")
+parser.add_argument("--output", required=True)
+parser.add_argument("--transcript-output")
+parser.add_argument("--config")
+parser.add_argument("--progress", action="store_true")
+arguments = parser.parse_args()
+
+marker = Path(__file__).with_name("model-failed-once")
+transcript = "DO_NOT_LOG_TRANSCRIPT_013"
+if arguments.progress:
+    print(json.dumps({"status": "transcribing"}), flush=True)
+Path(arguments.transcript_output).write_text(transcript + "\n", encoding="utf-8")
+if arguments.progress:
+    print(json.dumps({"status": "analyzing"}), flush=True)
+
+if not marker.exists():
+    marker.write_text("failed", encoding="utf-8")
+    print("오류: DO_NOT_LOG_MODEL_ERROR_013", file=sys.stderr)
+    sys.exit(6)
+
+Path(arguments.output).write_text(
+    json.dumps({
+        "title": "DO_NOT_LOG_MINUTES_013",
+        "date": None,
+        "summary": transcript,
+        "topics": [],
+        "decisions": [],
+        "action_items": [],
+        "open_issues": [],
+    }),
+    encoding="utf-8",
+)
+print(json.dumps({
+    "status": "completed",
+    "output": str(Path(arguments.output).resolve()),
+    "transcript_output": str(Path(arguments.transcript_output).resolve()),
+}), flush=True)
+)PY";
+}
+
+class ApplicationLogGuard final
+{
+public:
+    ~ApplicationLogGuard()
+    {
+        ApplicationLog::shutdown();
+    }
+};
 
 class FakeAudioRecorder final : public AudioRecorder
 {
@@ -248,6 +309,7 @@ private slots:
     void serializesEmptyMinutesLists();
     void reportsMinutesExportFailure();
     void rejectsInvalidMeetingMinutesJson();
+    void completesWorkflowAfterModelFailureWithoutLoggingContent();
 };
 
 void AppShellTest::initTestCase()
@@ -1265,6 +1327,112 @@ void AppShellTest::rejectsInvalidMeetingMinutesJson()
                 ->text().contains(QStringLiteral("JSON")));
     QVERIFY(!window.findChild<QGroupBox *>(QStringLiteral("minutesEditorGroup"))
                  ->isEnabled());
+}
+
+void AppShellTest::completesWorkflowAfterModelFailureWithoutLoggingContent()
+{
+    const QString python = pythonExecutable();
+    if (python.isEmpty()) {
+        QSKIP("Python 실행 파일이 없어 통합 로그 테스트를 건너뜁니다.");
+    }
+
+    QTemporaryDir temporaryDirectory;
+    QVERIFY(temporaryDirectory.isValid());
+    const QDir root(temporaryDirectory.path());
+    const QString scriptPath = root.filePath(QStringLiteral("fail_once_backend.py"));
+    const QString logPath = root.filePath(QStringLiteral("logs/meeting-minutes.log"));
+    QVERIFY(writeTextFile(scriptPath, failOnceBackendScript()));
+
+    ApplicationLog::shutdown();
+    ApplicationLogGuard logGuard;
+    QVERIFY(ApplicationLog::initialize(logPath));
+
+    FakeAudioRecorder recorder;
+    AiBackendClient backendClient(python, scriptPath);
+    MainWindow window(&recorder, &backendClient, temporaryDirectory.path());
+    auto *titleEdit = window.findChild<QLineEdit *>(QStringLiteral("titleEdit"));
+    auto *startButton = window.findChild<QPushButton *>(
+        QStringLiteral("startRecordingButton"));
+    auto *stopButton = window.findChild<QPushButton *>(
+        QStringLiteral("stopRecordingButton"));
+    auto *generateButton = window.findChild<QPushButton *>(
+        QStringLiteral("generateMinutesButton"));
+    QSignalSpy failedSpy(&backendClient, &AiBackendClient::failed);
+    QSignalSpy completedSpy(&backendClient, &AiBackendClient::completed);
+
+    titleEdit->setText(QStringLiteral("DO_NOT_LOG_TITLE_013"));
+    startButton->click();
+    stopButton->click();
+    generateButton->click();
+    QTRY_COMPARE_WITH_TIMEOUT(failedSpy.count(), 1, 5000);
+    QCOMPARE(completedSpy.count(), 0);
+    QVERIFY(generateButton->isEnabled());
+
+    generateButton->click();
+    QTRY_COMPARE_WITH_TIMEOUT(completedSpy.count(), 1, 5000);
+    QVERIFY(window.hasCurrentMinutes());
+
+    window.findChild<QPushButton *>(QStringLiteral("exportMarkdownButton"))->click();
+    window.findChild<QPushButton *>(QStringLiteral("exportTextButton"))->click();
+    window.findChild<QPushButton *>(QStringLiteral("exportJsonButton"))->click();
+
+    const QDir meetingDirectory(
+        QFileInfo(completedSpy.at(0).at(0).toString()).absolutePath());
+    QVERIFY(QFileInfo::exists(meetingDirectory.filePath(QStringLiteral("meeting.md"))));
+    QVERIFY(QFileInfo::exists(meetingDirectory.filePath(QStringLiteral("meeting.txt"))));
+    QVERIFY(QFileInfo::exists(meetingDirectory.filePath(QStringLiteral("meeting.json"))));
+    QVERIFY(QFileInfo::exists(meetingDirectory.filePath(QStringLiteral("transcript.txt"))));
+
+    ApplicationLog::shutdown();
+    const QByteArray logContents = readFile(logPath);
+    QVERIFY(!logContents.isEmpty());
+    QVERIFY(!logContents.contains("DO_NOT_LOG_TITLE_013"));
+    QVERIFY(!logContents.contains("DO_NOT_LOG_TRANSCRIPT_013"));
+    QVERIFY(!logContents.contains("DO_NOT_LOG_MINUTES_013"));
+    QVERIFY(!logContents.contains("DO_NOT_LOG_MODEL_ERROR_013"));
+    QVERIFY(!logContents.contains(temporaryDirectory.path().toUtf8()));
+
+    QStringList events;
+    QSet<QString> exportedFormats;
+    const QStringList allowedKeys{
+        QStringLiteral("timestamp"),
+        QStringLiteral("level"),
+        QStringLiteral("event"),
+        QStringLiteral("duration_ms"),
+        QStringLiteral("format")
+    };
+    const QList<QByteArray> lines = logContents.split('\n');
+    for (const QByteArray &line : lines) {
+        if (line.trimmed().isEmpty()) {
+            continue;
+        }
+        QJsonParseError parseError;
+        const QJsonDocument document = QJsonDocument::fromJson(line, &parseError);
+        QCOMPARE(parseError.error, QJsonParseError::NoError);
+        QVERIFY(document.isObject());
+        const QJsonObject entry = document.object();
+        for (const QString &key : entry.keys()) {
+            QVERIFY2(allowedKeys.contains(key), qPrintable(key));
+        }
+        events.append(entry.value(QStringLiteral("event")).toString());
+        if (entry.value(QStringLiteral("event")).toString()
+            == QStringLiteral("export_completed")) {
+            exportedFormats.insert(entry.value(QStringLiteral("format")).toString());
+        }
+    }
+
+    QVERIFY(events.contains(QStringLiteral("application_started")));
+    QVERIFY(events.contains(QStringLiteral("application_stopped")));
+    QVERIFY(events.contains(QStringLiteral("recording_started")));
+    QVERIFY(events.contains(QStringLiteral("recording_completed")));
+    QVERIFY(events.contains(QStringLiteral("analysis_failed")));
+    QVERIFY(events.contains(QStringLiteral("backend_failed")));
+    QVERIFY(events.contains(QStringLiteral("backend_completed")));
+    QCOMPARE(events.count(QStringLiteral("backend_started")), 2);
+    QCOMPARE(exportedFormats,
+             QSet<QString>({QStringLiteral("markdown"),
+                            QStringLiteral("text"),
+                            QStringLiteral("json")}));
 }
 
 QTEST_MAIN(AppShellTest)

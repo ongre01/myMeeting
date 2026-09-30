@@ -1,4 +1,5 @@
 #include "mainwindow.h"
+#include "applicationlog.h"
 #include "ui_mainwindow.h"
 
 #include <QCoreApplication>
@@ -16,6 +17,21 @@
 #include <QStatusBar>
 #include <QTableWidget>
 #include <QTimer>
+
+namespace {
+ApplicationLog::ExportFormat logExportFormat(MeetingExporter::Format format)
+{
+    switch (format) {
+    case MeetingExporter::Format::Markdown:
+        return ApplicationLog::ExportFormat::Markdown;
+    case MeetingExporter::Format::Text:
+        return ApplicationLog::ExportFormat::Text;
+    case MeetingExporter::Format::Json:
+        return ApplicationLog::ExportFormat::Json;
+    }
+    return ApplicationLog::ExportFormat::None;
+}
+} // namespace
 
 MainWindow::MainWindow(QWidget *parent)
     : MainWindow(new AudioRecorder,
@@ -272,6 +288,7 @@ void MainWindow::handleRecordingStarted()
     ui->transcriptEdit->clear();
     clearMinutesEditor();
     m_elapsedClock.restart();
+    ApplicationLog::record(ApplicationLog::Event::RecordingStarted);
     m_elapsedTimer->start();
     ui->elapsedTimeLabel->setText(QStringLiteral("00:00:00"));
     ui->statusLabel->setText(QStringLiteral("녹음 중"));
@@ -287,6 +304,9 @@ void MainWindow::handleRecordingStopped(const QString &filePath)
 {
     updateElapsedTime();
     m_elapsedTimer->stop();
+    ApplicationLog::record(
+        ApplicationLog::Event::RecordingCompleted,
+        m_elapsedClock.isValid() ? m_elapsedClock.elapsed() : -1);
     m_lastRecordingPath = QFileInfo(filePath).absoluteFilePath();
     m_lastMeetingDirectory = QFileInfo(filePath).absolutePath();
     ui->statusLabel->setText(QStringLiteral("녹음 완료"));
@@ -301,6 +321,11 @@ void MainWindow::handleRecordingStopped(const QString &filePath)
 
 void MainWindow::handleRecordingError(const QString &message)
 {
+    ApplicationLog::record(
+        ApplicationLog::Event::RecordingError,
+        m_recordingStarted && m_elapsedClock.isValid()
+            ? m_elapsedClock.elapsed()
+            : -1);
     if (m_audioRecorder->isRecording()) {
         ui->statusLabel->setText(
             QStringLiteral("녹음 중 - %1").arg(message));
@@ -421,6 +446,50 @@ void MainWindow::startBackendProcessing()
 void MainWindow::handleBackendStateChanged(AiBackendClient::State state,
                                            const QString &message)
 {
+    if (state == AiBackendClient::State::Transcribing
+        || state == AiBackendClient::State::Analyzing) {
+        if (!m_backendOperationActive) {
+            m_backendOperationActive = true;
+            m_backendClock.restart();
+            m_loggedBackendPhase = AiBackendClient::State::Idle;
+            ApplicationLog::record(ApplicationLog::Event::BackendStarted);
+        }
+
+        if (m_loggedBackendPhase != state) {
+            if (m_loggedBackendPhase == AiBackendClient::State::Transcribing) {
+                ApplicationLog::record(
+                    ApplicationLog::Event::TranscriptionCompleted,
+                    m_backendPhaseClock.elapsed());
+            } else if (m_loggedBackendPhase == AiBackendClient::State::Analyzing) {
+                ApplicationLog::record(
+                    ApplicationLog::Event::AnalysisCompleted,
+                    m_backendPhaseClock.elapsed());
+            }
+
+            m_loggedBackendPhase = state;
+            m_backendPhaseClock.restart();
+            ApplicationLog::record(
+                state == AiBackendClient::State::Transcribing
+                    ? ApplicationLog::Event::TranscriptionStarted
+                    : ApplicationLog::Event::AnalysisStarted);
+        }
+    } else if (state == AiBackendClient::State::Completed
+               && m_backendOperationActive) {
+        if (m_loggedBackendPhase == AiBackendClient::State::Transcribing) {
+            ApplicationLog::record(
+                ApplicationLog::Event::TranscriptionCompleted,
+                m_backendPhaseClock.elapsed());
+        } else if (m_loggedBackendPhase == AiBackendClient::State::Analyzing) {
+            ApplicationLog::record(
+                ApplicationLog::Event::AnalysisCompleted,
+                m_backendPhaseClock.elapsed());
+        }
+        ApplicationLog::record(ApplicationLog::Event::BackendCompleted,
+                               m_backendClock.elapsed());
+        m_backendOperationActive = false;
+        m_loggedBackendPhase = AiBackendClient::State::Idle;
+    }
+
     switch (state) {
     case AiBackendClient::State::Idle:
         ui->backendStatusLabel->setText(QStringLiteral("Idle — 대기 중"));
@@ -671,7 +740,13 @@ void MainWindow::exportJsonMinutes()
 
 void MainWindow::exportCurrentMinutes(MeetingExporter::Format format)
 {
+    QElapsedTimer exportClock;
+    exportClock.start();
+    const ApplicationLog::ExportFormat loggedFormat = logExportFormat(format);
     if (!m_hasCurrentMinutes || m_currentMinutesPath.isEmpty()) {
+        ApplicationLog::record(ApplicationLog::Event::ExportFailed,
+                               exportClock.elapsed(),
+                               loggedFormat);
         showExportFailure(QStringLiteral("내보낼 회의록이 없습니다."));
         return;
     }
@@ -683,9 +758,16 @@ void MainWindow::exportCurrentMinutes(MeetingExporter::Format format)
                                QFileInfo(m_currentMinutesPath).absolutePath(),
                                &savedPath,
                                &errorMessage)) {
+        ApplicationLog::record(ApplicationLog::Event::ExportFailed,
+                               exportClock.elapsed(),
+                               loggedFormat);
         showExportFailure(errorMessage);
         return;
     }
+
+    ApplicationLog::record(ApplicationLog::Event::ExportCompleted,
+                           exportClock.elapsed(),
+                           loggedFormat);
 
     statusBar()->showMessage(
         QStringLiteral("%1 회의록 저장 완료: %2")
@@ -702,6 +784,23 @@ void MainWindow::showExportFailure(const QString &message)
 
 void MainWindow::handleBackendFailed(const QString &message)
 {
+    if (m_backendOperationActive) {
+        if (m_loggedBackendPhase == AiBackendClient::State::Transcribing) {
+            ApplicationLog::record(
+                ApplicationLog::Event::TranscriptionFailed,
+                m_backendPhaseClock.elapsed());
+        } else if (m_loggedBackendPhase == AiBackendClient::State::Analyzing) {
+            ApplicationLog::record(ApplicationLog::Event::AnalysisFailed,
+                                   m_backendPhaseClock.elapsed());
+        }
+        ApplicationLog::record(ApplicationLog::Event::BackendFailed,
+                               m_backendClock.elapsed());
+        m_backendOperationActive = false;
+        m_loggedBackendPhase = AiBackendClient::State::Idle;
+    } else {
+        ApplicationLog::record(ApplicationLog::Event::WorkflowFailed);
+    }
+
     ui->backendStatusLabel->setText(QStringLiteral("Error — 처리 실패"));
     ui->backendMessageLabel->setText(message);
     ui->backendProgressBar->setRange(0, 1);

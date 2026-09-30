@@ -12,6 +12,7 @@ INCLUDEPATH += ..
 
 SOURCES += \
     tst_appshell.cpp \
+    ../applicationlog.cpp \
     ../aibackendclient.cpp \
     ../mainwindow.cpp \
     ../meetingexporter.cpp \
@@ -21,6 +22,7 @@ SOURCES += \
     ../wavfilewriter.cpp
 
 HEADERS += \
+    ../applicationlog.h \
     ../aibackendclient.h \
     ../mainwindow.h \
     ../meetingexporter.h \
