@@ -12,12 +12,14 @@ INCLUDEPATH += ..
 
 SOURCES += \
     tst_appshell.cpp \
+    ../aibackendclient.cpp \
     ../mainwindow.cpp \
     ../meetingstorage.cpp \
     ../audiorecorder.cpp \
     ../wavfilewriter.cpp
 
 HEADERS += \
+    ../aibackendclient.h \
     ../mainwindow.h \
     ../meetingstorage.h \
     ../audiorecorder.h \

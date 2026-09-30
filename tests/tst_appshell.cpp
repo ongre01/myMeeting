@@ -1,3 +1,4 @@
+#include "aibackendclient.h"
 #include "audiorecorder.h"
 #include "mainwindow.h"
 #include "meetingstorage.h"
@@ -10,6 +11,7 @@
 #include <QLabel>
 #include <QLineEdit>
 #include <QPushButton>
+#include <QStandardPaths>
 #include <QStatusBar>
 #include <QTemporaryDir>
 #include <QtEndian>
@@ -37,6 +39,55 @@ quint32 littleEndian32(const QByteArray &data, qsizetype offset)
 {
     return qFromLittleEndian<quint32>(
         reinterpret_cast<const uchar *>(data.constData() + offset));
+}
+
+bool writeTextFile(const QString &path, const QByteArray &contents)
+{
+    QFile file(path);
+    return file.open(QIODevice::WriteOnly | QIODevice::Truncate)
+           && file.write(contents) == contents.size();
+}
+
+QString pythonExecutable()
+{
+    QString executable = QStandardPaths::findExecutable(QStringLiteral("python"));
+    if (executable.isEmpty()) {
+        executable = QStandardPaths::findExecutable(QStringLiteral("python3"));
+    }
+    return executable;
+}
+
+QByteArray successfulBackendScript()
+{
+    return R"PY(import argparse
+import json
+from pathlib import Path
+import time
+
+parser = argparse.ArgumentParser()
+parser.add_argument("--input", required=True)
+parser.add_argument("--output", required=True)
+parser.add_argument("--transcript-output", required=True)
+parser.add_argument("--config")
+parser.add_argument("--progress", action="store_true")
+arguments = parser.parse_args()
+
+if arguments.progress:
+    print(json.dumps({"status": "transcribing"}), flush=True)
+time.sleep(0.25)
+Path(arguments.transcript_output).write_text("테스트 Transcript\n", encoding="utf-8")
+if arguments.progress:
+    print(json.dumps({"status": "analyzing"}), flush=True)
+Path(arguments.output).write_text(
+    json.dumps({"title": "테스트 회의"}, ensure_ascii=False),
+    encoding="utf-8",
+)
+print(json.dumps({
+    "status": "completed",
+    "output": str(Path(arguments.output).resolve()),
+    "transcript_output": str(Path(arguments.transcript_output).resolve()),
+}), flush=True)
+)PY";
 }
 
 class FakeAudioRecorder final : public AudioRecorder
@@ -132,6 +183,7 @@ class AppShellTest : public QObject
     Q_OBJECT
 
 private slots:
+    void initTestCase();
     void createsRecordingMainWindow();
     void disablesRecordingWhenNoMicrophoneExists();
     void recordsWavFromMainWindowButtons();
@@ -146,7 +198,17 @@ private slots:
     void writesValidZeroSecondWav();
     void reportsWavStorageFailure();
     void rejectsMissingAudioDevice();
+    void runsBackendAsynchronouslyAndPreventsDuplicateRequests();
+    void reportsMissingBackendExecutable();
+    void reportsAbnormalBackendExit();
+    void rejectsMissingBackendOutput();
+    void deliversBackendResultToMainWindow();
 };
+
+void AppShellTest::initTestCase()
+{
+    qRegisterMetaType<AiBackendClient::State>("AiBackendClient::State");
+}
 
 void AppShellTest::createsRecordingMainWindow()
 {
@@ -489,6 +551,200 @@ void AppShellTest::rejectsMissingAudioDevice()
     QVERIFY(!recorder.isRecording());
     QCOMPARE(errorSpy.count(), 1);
     QVERIFY(!errorSpy.at(0).at(0).toString().isEmpty());
+}
+
+void AppShellTest::runsBackendAsynchronouslyAndPreventsDuplicateRequests()
+{
+    const QString python = pythonExecutable();
+    if (python.isEmpty()) {
+        QSKIP("Python 실행 파일이 없어 백엔드 프로세스 테스트를 건너뜁니다.");
+    }
+
+    QTemporaryDir temporaryDirectory;
+    QVERIFY(temporaryDirectory.isValid());
+    const QDir directory(temporaryDirectory.path());
+    const QString inputPath = directory.filePath(QStringLiteral("meeting.wav"));
+    const QString outputPath = directory.filePath(QStringLiteral("meeting.json"));
+    const QString transcriptPath = directory.filePath(QStringLiteral("transcript.txt"));
+    const QString scriptPath = directory.filePath(QStringLiteral("fake_backend.py"));
+    QVERIFY(writeTextFile(inputPath, QByteArrayLiteral("local wav placeholder")));
+    QVERIFY(writeTextFile(scriptPath, successfulBackendScript()));
+
+    AiBackendClient client(python, scriptPath);
+    QSignalSpy stateSpy(&client, &AiBackendClient::stateChanged);
+    QSignalSpy completedSpy(&client, &AiBackendClient::completed);
+    QSignalSpy failedSpy(&client, &AiBackendClient::failed);
+
+    QVERIFY(client.start(inputPath, outputPath, transcriptPath));
+    QVERIFY(client.isRunning());
+    QVERIFY(!client.start(inputPath, outputPath, transcriptPath));
+
+    QTRY_COMPARE_WITH_TIMEOUT(completedSpy.count(), 1, 5000);
+    QCOMPARE(failedSpy.count(), 0);
+    QCOMPARE(client.state(), AiBackendClient::State::Completed);
+    QVERIFY(QFileInfo::exists(outputPath));
+    QVERIFY(QFileInfo::exists(transcriptPath));
+
+    bool sawTranscribing = false;
+    bool sawAnalyzing = false;
+    bool sawCompleted = false;
+    for (const QList<QVariant> &arguments : stateSpy) {
+        const auto state = arguments.at(0).value<AiBackendClient::State>();
+        sawTranscribing = sawTranscribing || state == AiBackendClient::State::Transcribing;
+        sawAnalyzing = sawAnalyzing || state == AiBackendClient::State::Analyzing;
+        sawCompleted = sawCompleted || state == AiBackendClient::State::Completed;
+    }
+    QVERIFY(sawTranscribing);
+    QVERIFY(sawAnalyzing);
+    QVERIFY(sawCompleted);
+}
+
+void AppShellTest::reportsMissingBackendExecutable()
+{
+    QTemporaryDir temporaryDirectory;
+    QVERIFY(temporaryDirectory.isValid());
+    const QDir directory(temporaryDirectory.path());
+    const QString inputPath = directory.filePath(QStringLiteral("meeting.wav"));
+    const QString scriptPath = directory.filePath(QStringLiteral("fake_backend.py"));
+    QVERIFY(writeTextFile(inputPath, QByteArrayLiteral("local wav placeholder")));
+    QVERIFY(writeTextFile(scriptPath, successfulBackendScript()));
+
+    AiBackendClient client(
+        directory.filePath(QStringLiteral("missing-python.exe")), scriptPath);
+    QSignalSpy failedSpy(&client, &AiBackendClient::failed);
+
+    QVERIFY(!client.start(
+        inputPath,
+        directory.filePath(QStringLiteral("meeting.json")),
+        directory.filePath(QStringLiteral("transcript.txt"))));
+    QCOMPARE(failedSpy.count(), 1);
+    QCOMPARE(client.state(), AiBackendClient::State::Error);
+    QVERIFY(client.errorMessage().contains(QStringLiteral("실행 파일")));
+}
+
+void AppShellTest::reportsAbnormalBackendExit()
+{
+    const QString python = pythonExecutable();
+    if (python.isEmpty()) {
+        QSKIP("Python 실행 파일이 없어 백엔드 프로세스 테스트를 건너뜁니다.");
+    }
+
+    QTemporaryDir temporaryDirectory;
+    QVERIFY(temporaryDirectory.isValid());
+    const QDir directory(temporaryDirectory.path());
+    const QString inputPath = directory.filePath(QStringLiteral("meeting.wav"));
+    const QString scriptPath = directory.filePath(QStringLiteral("failing_backend.py"));
+    QVERIFY(writeTextFile(inputPath, QByteArrayLiteral("local wav placeholder")));
+    QVERIFY(writeTextFile(
+        scriptPath,
+        QByteArrayLiteral(
+            "import sys\n"
+            "sys.stderr.reconfigure(encoding='utf-8')\n"
+            "print('\\uc624\\ub958: \\ud14c\\uc2a4\\ud2b8 \\ubc31\\uc5d4\\ub4dc \\uc2e4\\ud328', "
+            "file=sys.stderr)\n"
+            "sys.exit(6)\n")));
+
+    AiBackendClient client(python, scriptPath);
+    QSignalSpy failedSpy(&client, &AiBackendClient::failed);
+    QSignalSpy completedSpy(&client, &AiBackendClient::completed);
+
+    QVERIFY(client.start(
+        inputPath,
+        directory.filePath(QStringLiteral("meeting.json")),
+        directory.filePath(QStringLiteral("transcript.txt"))));
+    QTRY_COMPARE_WITH_TIMEOUT(failedSpy.count(), 1, 5000);
+    QCOMPARE(completedSpy.count(), 0);
+    QCOMPARE(client.state(), AiBackendClient::State::Error);
+    QVERIFY2(client.errorMessage().contains(QStringLiteral("테스트 백엔드 실패")),
+             qPrintable(client.errorMessage()));
+}
+
+void AppShellTest::rejectsMissingBackendOutput()
+{
+    const QString python = pythonExecutable();
+    if (python.isEmpty()) {
+        QSKIP("Python 실행 파일이 없어 백엔드 프로세스 테스트를 건너뜁니다.");
+    }
+
+    QTemporaryDir temporaryDirectory;
+    QVERIFY(temporaryDirectory.isValid());
+    const QDir directory(temporaryDirectory.path());
+    const QString inputPath = directory.filePath(QStringLiteral("meeting.wav"));
+    const QString scriptPath = directory.filePath(QStringLiteral("missing_output.py"));
+    QVERIFY(writeTextFile(inputPath, QByteArrayLiteral("local wav placeholder")));
+    QVERIFY(writeTextFile(
+        scriptPath,
+        QByteArrayLiteral(
+            "import argparse, json\n"
+            "from pathlib import Path\n"
+            "parser = argparse.ArgumentParser()\n"
+            "parser.add_argument('--input')\n"
+            "parser.add_argument('--output')\n"
+            "parser.add_argument('--transcript-output')\n"
+            "parser.add_argument('--progress', action='store_true')\n"
+            "arguments = parser.parse_args()\n"
+            "Path(arguments.transcript_output).write_text('', encoding='utf-8')\n"
+            "print(json.dumps({'status': 'completed'}), flush=True)\n")));
+
+    AiBackendClient client(python, scriptPath);
+    QSignalSpy failedSpy(&client, &AiBackendClient::failed);
+
+    QVERIFY(client.start(
+        inputPath,
+        directory.filePath(QStringLiteral("meeting.json")),
+        directory.filePath(QStringLiteral("transcript.txt"))));
+    QTRY_COMPARE_WITH_TIMEOUT(failedSpy.count(), 1, 5000);
+    QCOMPARE(client.state(), AiBackendClient::State::Error);
+    QVERIFY(client.errorMessage().contains(QStringLiteral("회의록 출력 파일")));
+}
+
+void AppShellTest::deliversBackendResultToMainWindow()
+{
+    const QString python = pythonExecutable();
+    if (python.isEmpty()) {
+        QSKIP("Python 실행 파일이 없어 백엔드 프로세스 테스트를 건너뜁니다.");
+    }
+
+    QTemporaryDir temporaryDirectory;
+    QVERIFY(temporaryDirectory.isValid());
+    const QDir root(temporaryDirectory.path());
+    const QString scriptPath = root.filePath(QStringLiteral("fake_backend.py"));
+    QVERIFY(writeTextFile(scriptPath, successfulBackendScript()));
+
+    FakeAudioRecorder recorder;
+    AiBackendClient backendClient(python, scriptPath);
+    MainWindow window(&recorder, &backendClient, temporaryDirectory.path());
+    auto *startButton = window.findChild<QPushButton *>(
+        QStringLiteral("startRecordingButton"));
+    auto *stopButton = window.findChild<QPushButton *>(
+        QStringLiteral("stopRecordingButton"));
+    auto *generateButton = window.findChild<QPushButton *>(
+        QStringLiteral("generateMinutesButton"));
+    auto *backendStatus = window.findChild<QLabel *>(
+        QStringLiteral("backendStatusLabel"));
+    QSignalSpy completedSpy(&backendClient, &AiBackendClient::completed);
+
+    QVERIFY(!generateButton->isEnabled());
+    startButton->click();
+    stopButton->click();
+    QVERIFY(generateButton->isEnabled());
+
+    generateButton->click();
+    QVERIFY(!generateButton->isEnabled());
+    QVERIFY(!startButton->isEnabled());
+    QVERIFY(QMetaObject::invokeMethod(&window, "startBackendProcessing"));
+
+    QTRY_COMPARE_WITH_TIMEOUT(completedSpy.count(), 1, 5000);
+    QCOMPARE(backendStatus->text(), QStringLiteral("Completed — 처리 완료"));
+    QVERIFY(generateButton->isEnabled());
+    QVERIFY(startButton->isEnabled());
+
+    const QStringList meetingDirectories = root.entryList(
+        QDir::Dirs | QDir::NoDotAndDotDot);
+    QCOMPARE(meetingDirectories.size(), 1);
+    const QDir meetingDirectory(root.filePath(meetingDirectories.first()));
+    QVERIFY(QFileInfo::exists(meetingDirectory.filePath(QStringLiteral("transcript.txt"))));
+    QVERIFY(QFileInfo::exists(meetingDirectory.filePath(QStringLiteral("meeting.json"))));
 }
 
 QTEST_MAIN(AppShellTest)

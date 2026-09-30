@@ -5,13 +5,16 @@
 #include <QDateTime>
 #include <QDir>
 #include <QFile>
+#include <QFileInfo>
 #include <QMediaDevices>
 #include <QStatusBar>
 #include <QTimer>
 
 MainWindow::MainWindow(QWidget *parent)
     : MainWindow(new AudioRecorder,
+                 new AiBackendClient,
                  defaultMeetingsRoot(),
+                 true,
                  true,
                  parent)
 {
@@ -20,23 +23,48 @@ MainWindow::MainWindow(QWidget *parent)
 MainWindow::MainWindow(AudioRecorder *audioRecorder,
                        const QString &meetingsRoot,
                        QWidget *parent)
-    : MainWindow(audioRecorder, meetingsRoot, false, parent)
+    : MainWindow(audioRecorder,
+                 new AiBackendClient,
+                 meetingsRoot,
+                 false,
+                 true,
+                 parent)
 {
 }
 
 MainWindow::MainWindow(AudioRecorder *audioRecorder,
+                       AiBackendClient *aiBackendClient,
+                       const QString &meetingsRoot,
+                       QWidget *parent)
+    : MainWindow(audioRecorder,
+                 aiBackendClient,
+                 meetingsRoot,
+                 false,
+                 false,
+                 parent)
+{
+}
+
+MainWindow::MainWindow(AudioRecorder *audioRecorder,
+                       AiBackendClient *aiBackendClient,
                        const QString &meetingsRoot,
                        bool takeRecorderOwnership,
+                       bool takeBackendOwnership,
                        QWidget *parent)
     : QMainWindow(parent)
     , ui(new Ui::MainWindow)
     , m_audioRecorder(audioRecorder)
+    , m_aiBackendClient(aiBackendClient)
     , m_storage(meetingsRoot)
     , m_elapsedTimer(new QTimer(this))
 {
     Q_ASSERT(m_audioRecorder);
+    Q_ASSERT(m_aiBackendClient);
     if (takeRecorderOwnership) {
         m_audioRecorder->setParent(this);
+    }
+    if (takeBackendOwnership) {
+        m_aiBackendClient->setParent(this);
     }
 
     ui->setupUi(this);
@@ -64,6 +92,8 @@ void MainWindow::initialize()
             this, &MainWindow::startRecording);
     connect(ui->stopRecordingButton, &QPushButton::clicked,
             this, &MainWindow::stopRecording);
+    connect(ui->generateMinutesButton, &QPushButton::clicked,
+            this, &MainWindow::startBackendProcessing);
     connect(m_elapsedTimer, &QTimer::timeout,
             this, &MainWindow::updateElapsedTime);
     connect(m_audioRecorder, &AudioRecorder::recordingStarted,
@@ -72,12 +102,20 @@ void MainWindow::initialize()
             this, &MainWindow::handleRecordingStopped);
     connect(m_audioRecorder, &AudioRecorder::recordingError,
             this, &MainWindow::handleRecordingError);
+    connect(m_aiBackendClient, &AiBackendClient::stateChanged,
+            this, &MainWindow::handleBackendStateChanged);
+    connect(m_aiBackendClient, &AiBackendClient::completed,
+            this, &MainWindow::handleBackendCompleted);
+    connect(m_aiBackendClient, &AiBackendClient::failed,
+            this, &MainWindow::handleBackendFailed);
 
     auto *mediaDevices = new QMediaDevices(this);
     connect(mediaDevices, &QMediaDevices::audioInputsChanged,
             this, &MainWindow::refreshInputDevices);
 
     setRecordingControls(false);
+    ui->backendProgressBar->setRange(0, 1);
+    ui->backendProgressBar->setValue(0);
     refreshInputDevices();
     statusBar()->showMessage(QStringLiteral("로컬 녹음만 사용합니다."));
 }
@@ -117,6 +155,11 @@ void MainWindow::refreshInputDevices()
 
 void MainWindow::startRecording()
 {
+    if (m_aiBackendClient->isRunning()) {
+        statusBar()->showMessage(QStringLiteral("AI 작업이 끝난 뒤 새 녹음을 시작하세요."));
+        return;
+    }
+
     if (m_audioRecorder->isRecording()) {
         handleRecordingError(QStringLiteral("이미 녹음 중입니다."));
         return;
@@ -161,10 +204,16 @@ void MainWindow::stopRecording()
 void MainWindow::handleRecordingStarted()
 {
     m_recordingStarted = true;
+    m_lastMeetingDirectory.clear();
+    m_lastRecordingPath.clear();
     m_elapsedClock.restart();
     m_elapsedTimer->start();
     ui->elapsedTimeLabel->setText(QStringLiteral("00:00:00"));
     ui->statusLabel->setText(QStringLiteral("녹음 중"));
+    ui->backendStatusLabel->setText(QStringLiteral("Idle — 대기 중"));
+    ui->backendMessageLabel->clear();
+    ui->backendProgressBar->setRange(0, 1);
+    ui->backendProgressBar->setValue(0);
     setRecordingControls(true);
     statusBar()->showMessage(QStringLiteral("회의 음성을 로컬 WAV 파일로 저장하고 있습니다."));
 }
@@ -173,6 +222,8 @@ void MainWindow::handleRecordingStopped(const QString &filePath)
 {
     updateElapsedTime();
     m_elapsedTimer->stop();
+    m_lastRecordingPath = QFileInfo(filePath).absoluteFilePath();
+    m_lastMeetingDirectory = QFileInfo(filePath).absolutePath();
     ui->statusLabel->setText(QStringLiteral("녹음 완료"));
     setRecordingControls(false);
     statusBar()->showMessage(
@@ -225,13 +276,16 @@ void MainWindow::updateElapsedTime()
 
 void MainWindow::setRecordingControls(bool recording)
 {
+    const bool backendRunning = m_aiBackendClient->isRunning();
     const bool hasDevice = ui->deviceComboBox->count() > 0
                            && ui->deviceComboBox->itemData(0).isValid();
-    ui->titleEdit->setEnabled(!recording);
-    ui->deviceComboBox->setEnabled(!recording && hasDevice);
-    ui->refreshDevicesButton->setEnabled(!recording);
-    ui->startRecordingButton->setEnabled(!recording && hasDevice);
+    ui->titleEdit->setEnabled(!recording && !backendRunning);
+    ui->deviceComboBox->setEnabled(!recording && !backendRunning && hasDevice);
+    ui->refreshDevicesButton->setEnabled(!recording && !backendRunning);
+    ui->startRecordingButton->setEnabled(!recording && !backendRunning && hasDevice);
     ui->stopRecordingButton->setEnabled(recording);
+    ui->generateMinutesButton->setEnabled(
+        !recording && !backendRunning && !m_lastRecordingPath.isEmpty());
 }
 
 void MainWindow::discardUnusedMeeting()
@@ -245,4 +299,84 @@ void MainWindow::discardUnusedMeeting()
     }
 
     QDir().rmdir(m_currentMeetingDirectory);
+}
+
+void MainWindow::startBackendProcessing()
+{
+    if (m_aiBackendClient->isRunning()) {
+        statusBar()->showMessage(QStringLiteral("AI 백엔드 작업이 이미 실행 중입니다."));
+        return;
+    }
+    if (m_lastRecordingPath.isEmpty() || m_lastMeetingDirectory.isEmpty()) {
+        handleBackendFailed(QStringLiteral("먼저 회의를 녹음해 주세요."));
+        return;
+    }
+
+    const QDir meetingDirectory(m_lastMeetingDirectory);
+    const QString outputPath = meetingDirectory.filePath(QStringLiteral("meeting.json"));
+    const QString transcriptPath = meetingDirectory.filePath(QStringLiteral("transcript.txt"));
+    if (!m_aiBackendClient->start(m_lastRecordingPath,
+                                  outputPath,
+                                  transcriptPath)) {
+        setRecordingControls(false);
+    }
+}
+
+void MainWindow::handleBackendStateChanged(AiBackendClient::State state,
+                                           const QString &message)
+{
+    switch (state) {
+    case AiBackendClient::State::Idle:
+        ui->backendStatusLabel->setText(QStringLiteral("Idle — 대기 중"));
+        ui->backendProgressBar->setRange(0, 1);
+        ui->backendProgressBar->setValue(0);
+        break;
+    case AiBackendClient::State::Transcribing:
+        ui->backendStatusLabel->setText(
+            QStringLiteral("Transcribing — 음성을 텍스트로 변환 중"));
+        ui->backendProgressBar->setRange(0, 0);
+        break;
+    case AiBackendClient::State::Analyzing:
+        ui->backendStatusLabel->setText(
+            QStringLiteral("Analyzing — 회의 내용을 분석 중"));
+        ui->backendProgressBar->setRange(0, 0);
+        break;
+    case AiBackendClient::State::Completed:
+        ui->backendStatusLabel->setText(QStringLiteral("Completed — 처리 완료"));
+        ui->backendProgressBar->setRange(0, 1);
+        ui->backendProgressBar->setValue(1);
+        break;
+    case AiBackendClient::State::Error:
+        ui->backendStatusLabel->setText(QStringLiteral("Error — 처리 실패"));
+        ui->backendProgressBar->setRange(0, 1);
+        ui->backendProgressBar->setValue(0);
+        break;
+    }
+    ui->backendMessageLabel->setText(message);
+    setRecordingControls(m_audioRecorder->isRecording());
+}
+
+void MainWindow::handleBackendCompleted(const QString &outputPath,
+                                        const QString &transcriptPath)
+{
+    if (outputPath.isEmpty()) {
+        statusBar()->showMessage(
+            QStringLiteral("빈 Transcript 저장 완료: %1")
+                .arg(QDir::toNativeSeparators(transcriptPath)));
+    } else {
+        statusBar()->showMessage(
+            QStringLiteral("AI 회의록 저장 완료: %1")
+                .arg(QDir::toNativeSeparators(outputPath)));
+    }
+    setRecordingControls(false);
+}
+
+void MainWindow::handleBackendFailed(const QString &message)
+{
+    ui->backendStatusLabel->setText(QStringLiteral("Error — 처리 실패"));
+    ui->backendMessageLabel->setText(message);
+    ui->backendProgressBar->setRange(0, 1);
+    ui->backendProgressBar->setValue(0);
+    statusBar()->showMessage(message);
+    setRecordingControls(m_audioRecorder->isRecording());
 }

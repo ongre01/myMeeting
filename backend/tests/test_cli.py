@@ -55,6 +55,7 @@ class BackendCliTest(unittest.TestCase):
         transcript_output_path: Path | None = None,
         config_path: Path | None = None,
         environment: dict[str, str] | None = None,
+        progress: bool = False,
     ) -> subprocess.CompletedProcess[str]:
         command = [
             sys.executable,
@@ -70,6 +71,8 @@ class BackendCliTest(unittest.TestCase):
             command.extend(["--input", str(input_path or self.input_path)])
         if transcript_output_path is not None:
             command.extend(["--transcript-output", str(transcript_output_path)])
+        if progress:
+            command.append("--progress")
         return subprocess.run(
             command,
             capture_output=True,
@@ -97,6 +100,15 @@ class BackendCliTest(unittest.TestCase):
         self.assertEqual(Path(response["transcript_output"]), transcript_path)
         self.assertEqual(transcript_path.read_bytes(), b"")
         self.assertFalse(self.output_path.exists())
+
+    def test_progress_mode_emits_json_lines_without_changing_final_result(self) -> None:
+        completed = self._run_cli(progress=True)
+
+        self.assertEqual(completed.returncode, ExitCode.SUCCESS, completed.stderr)
+        events = [json.loads(line) for line in completed.stdout.splitlines()]
+        self.assertEqual(events[0], {"status": "transcribing"})
+        self.assertEqual(events[-1]["status"], "transcribed")
+        self.assertEqual(events[-1]["characters"], 0)
 
     def test_default_config_is_relative_to_backend_not_working_directory(self) -> None:
         completed = subprocess.run(

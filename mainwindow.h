@@ -1,6 +1,7 @@
 #ifndef MAINWINDOW_H
 #define MAINWINDOW_H
 
+#include "aibackendclient.h"
 #include "audiorecorder.h"
 #include "meetingstorage.h"
 
@@ -25,6 +26,10 @@ public:
     MainWindow(AudioRecorder *audioRecorder,
                const QString &meetingsRoot,
                QWidget *parent = nullptr);
+    MainWindow(AudioRecorder *audioRecorder,
+               AiBackendClient *aiBackendClient,
+               const QString &meetingsRoot,
+               QWidget *parent = nullptr);
     ~MainWindow() override;
 
 private slots:
@@ -35,11 +40,19 @@ private slots:
     void handleRecordingStopped(const QString &filePath);
     void handleRecordingError(const QString &message);
     void updateElapsedTime();
+    void startBackendProcessing();
+    void handleBackendStateChanged(AiBackendClient::State state,
+                                   const QString &message);
+    void handleBackendCompleted(const QString &outputPath,
+                                const QString &transcriptPath);
+    void handleBackendFailed(const QString &message);
 
 private:
     MainWindow(AudioRecorder *audioRecorder,
+               AiBackendClient *aiBackendClient,
                const QString &meetingsRoot,
                bool takeRecorderOwnership,
+               bool takeBackendOwnership,
                QWidget *parent);
 
     static QString defaultMeetingsRoot();
@@ -49,11 +62,14 @@ private:
 
     Ui::MainWindow *ui;
     AudioRecorder *m_audioRecorder;
+    AiBackendClient *m_aiBackendClient;
     MeetingStorage m_storage;
     QTimer *m_elapsedTimer;
     QElapsedTimer m_elapsedClock;
     QString m_currentMeetingDirectory;
     QString m_currentWavPath;
+    QString m_lastMeetingDirectory;
+    QString m_lastRecordingPath;
     bool m_recordingStarted = false;
 };
 #endif // MAINWINDOW_H

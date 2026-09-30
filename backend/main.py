@@ -87,6 +87,11 @@ def build_argument_parser() -> argparse.ArgumentParser:
         type=Path,
         help="Transcript TXT 경로 (기본값: 출력 JSON 폴더의 transcript.txt)",
     )
+    parser.add_argument(
+        "--progress",
+        action="store_true",
+        help="Qt 클라이언트용 JSON Lines 진행 상태를 표준 출력에 기록합니다.",
+    )
     return parser
 
 
@@ -259,6 +264,11 @@ def _configure_standard_streams() -> None:
             reconfigure(encoding="utf-8", errors="replace")
 
 
+def _emit_progress(enabled: bool, status: str) -> None:
+    if enabled:
+        print(json.dumps({"status": status}, ensure_ascii=False), flush=True)
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     _configure_standard_streams()
 
@@ -303,6 +313,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         return int(error.exit_code)
 
     if input_path is not None:
+        _emit_progress(arguments.progress, "transcribing")
         try:
             transcription = transcribe_wav(
                 input_path,
@@ -347,6 +358,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             return int(ExitCode.INPUT_ERROR)
 
     try:
+        _emit_progress(arguments.progress, "analyzing")
         minutes = analyze_transcript(
             transcript,
             model_source=configuration.llm_model,
