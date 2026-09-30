@@ -30,6 +30,9 @@ public:
                const QString &outputPath,
                const QString &transcriptPath,
                const QString &configPath = QString());
+    bool analyzeTranscript(const QString &transcriptPath,
+                           const QString &outputPath,
+                           const QString &configPath = QString());
     bool isRunning() const;
     State state() const;
     QString errorMessage() const;
@@ -51,6 +54,12 @@ private:
     void handleFinished(int exitCode, QProcess::ExitStatus exitStatus);
     void setState(State state, const QString &message);
     void finishWithError(const QString &message);
+    void resetRequest(const QString &outputPath,
+                      const QString &transcriptPath);
+    bool validateRuntime(QString *scriptPath);
+    void startProcess(const QStringList &arguments,
+                      State initialState,
+                      const QString &message);
     QString processFailureMessage(int exitCode) const;
     bool validateTranscriptOutput(QString *errorMessage) const;
     bool validateMeetingOutput(QString *errorMessage) const;

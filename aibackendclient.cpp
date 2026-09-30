@@ -91,14 +91,7 @@ bool AiBackendClient::start(const QString &inputPath,
         return false;
     }
 
-    m_terminalSignalSent = false;
-    m_errorMessage.clear();
-    m_protocolError.clear();
-    m_standardOutputBuffer.clear();
-    m_standardError.clear();
-    m_finalResult = {};
-    m_outputPath = QFileInfo(outputPath).absoluteFilePath();
-    m_transcriptPath = QFileInfo(transcriptPath).absoluteFilePath();
+    resetRequest(outputPath, transcriptPath);
 
     const QFileInfo inputInfo(inputPath);
     if (!inputInfo.isFile()) {
@@ -107,27 +100,13 @@ bool AiBackendClient::start(const QString &inputPath,
         return false;
     }
 
-    if (m_pythonExecutable.trimmed().isEmpty()) {
-        finishWithError(QStringLiteral("Python 3.11 이상 실행 파일을 찾을 수 없습니다."));
-        return false;
-    }
-
-    const QFileInfo executableInfo(m_pythonExecutable);
-    if (executableInfo.isAbsolute() && !executableInfo.isFile()) {
-        finishWithError(QStringLiteral("백엔드 실행 파일을 찾을 수 없습니다: %1")
-                            .arg(QDir::toNativeSeparators(m_pythonExecutable)));
-        return false;
-    }
-
-    const QFileInfo scriptInfo(m_backendScript);
-    if (!scriptInfo.isFile()) {
-        finishWithError(QStringLiteral("Python 백엔드 스크립트를 찾을 수 없습니다: %1")
-                            .arg(QDir::toNativeSeparators(scriptInfo.absoluteFilePath())));
+    QString scriptPath;
+    if (!validateRuntime(&scriptPath)) {
         return false;
     }
 
     QStringList arguments{
-        scriptInfo.absoluteFilePath(),
+        scriptPath,
         QStringLiteral("--input"),
         inputInfo.absoluteFilePath(),
         QStringLiteral("--output"),
@@ -141,11 +120,54 @@ bool AiBackendClient::start(const QString &inputPath,
                           QFileInfo(configPath).absoluteFilePath()});
     }
 
-    m_process->setProgram(m_pythonExecutable);
-    m_process->setArguments(arguments);
-    m_process->start();
-    setState(State::Transcribing,
-             QStringLiteral("음성을 텍스트로 변환 중..."));
+    startProcess(arguments,
+                 State::Transcribing,
+                 QStringLiteral("음성을 텍스트로 변환 중..."));
+    return true;
+}
+
+bool AiBackendClient::analyzeTranscript(const QString &transcriptPath,
+                                        const QString &outputPath,
+                                        const QString &configPath)
+{
+    if (isRunning()) {
+        return false;
+    }
+
+    resetRequest(outputPath, transcriptPath);
+
+    QFile transcriptFile(m_transcriptPath);
+    if (!transcriptFile.open(QIODevice::ReadOnly)) {
+        finishWithError(QStringLiteral("분석할 Transcript 파일을 읽을 수 없습니다: %1")
+                            .arg(QDir::toNativeSeparators(m_transcriptPath)));
+        return false;
+    }
+    if (transcriptFile.readAll().trimmed().isEmpty()) {
+        finishWithError(QStringLiteral("빈 Transcript는 회의록으로 분석할 수 없습니다."));
+        return false;
+    }
+
+    QString scriptPath;
+    if (!validateRuntime(&scriptPath)) {
+        return false;
+    }
+
+    QStringList arguments{
+        scriptPath,
+        QStringLiteral("--transcript-input"),
+        m_transcriptPath,
+        QStringLiteral("--output"),
+        m_outputPath,
+        QStringLiteral("--progress")
+    };
+    if (!configPath.trimmed().isEmpty()) {
+        arguments.append({QStringLiteral("--config"),
+                          QFileInfo(configPath).absoluteFilePath()});
+    }
+
+    startProcess(arguments,
+                 State::Analyzing,
+                 QStringLiteral("AI가 수정된 Transcript를 분석하고 있습니다..."));
     return true;
 }
 
@@ -337,6 +359,54 @@ void AiBackendClient::finishWithError(const QString &message)
                          : message.trimmed();
     setState(State::Error, m_errorMessage);
     emit failed(m_errorMessage);
+}
+
+void AiBackendClient::resetRequest(const QString &outputPath,
+                                   const QString &transcriptPath)
+{
+    m_terminalSignalSent = false;
+    m_errorMessage.clear();
+    m_protocolError.clear();
+    m_standardOutputBuffer.clear();
+    m_standardError.clear();
+    m_finalResult = {};
+    m_outputPath = QFileInfo(outputPath).absoluteFilePath();
+    m_transcriptPath = QFileInfo(transcriptPath).absoluteFilePath();
+}
+
+bool AiBackendClient::validateRuntime(QString *scriptPath)
+{
+    if (m_pythonExecutable.trimmed().isEmpty()) {
+        finishWithError(QStringLiteral("Python 3.11 이상 실행 파일을 찾을 수 없습니다."));
+        return false;
+    }
+
+    const QFileInfo executableInfo(m_pythonExecutable);
+    if (executableInfo.isAbsolute() && !executableInfo.isFile()) {
+        finishWithError(QStringLiteral("백엔드 실행 파일을 찾을 수 없습니다: %1")
+                            .arg(QDir::toNativeSeparators(m_pythonExecutable)));
+        return false;
+    }
+
+    const QFileInfo scriptInfo(m_backendScript);
+    if (!scriptInfo.isFile()) {
+        finishWithError(QStringLiteral("Python 백엔드 스크립트를 찾을 수 없습니다: %1")
+                            .arg(QDir::toNativeSeparators(scriptInfo.absoluteFilePath())));
+        return false;
+    }
+
+    *scriptPath = scriptInfo.absoluteFilePath();
+    return true;
+}
+
+void AiBackendClient::startProcess(const QStringList &arguments,
+                                   State initialState,
+                                   const QString &message)
+{
+    m_process->setProgram(m_pythonExecutable);
+    m_process->setArguments(arguments);
+    m_process->start();
+    setState(initialState, message);
 }
 
 QString AiBackendClient::processFailureMessage(int exitCode) const

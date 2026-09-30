@@ -41,6 +41,9 @@ private slots:
     void handleRecordingError(const QString &message);
     void updateElapsedTime();
     void startBackendProcessing();
+    void saveTranscript();
+    void reloadTranscript();
+    void handleTranscriptChanged();
     void handleBackendStateChanged(AiBackendClient::State state,
                                    const QString &message);
     void handleBackendCompleted(const QString &outputPath,
@@ -59,6 +62,8 @@ private:
     void initialize();
     void setRecordingControls(bool recording);
     void discardUnusedMeeting();
+    bool saveTranscriptToDisk(QString *errorMessage);
+    bool loadTranscriptFromDisk(const QString &path, QString *errorMessage);
 
     Ui::MainWindow *ui;
     AudioRecorder *m_audioRecorder;
@@ -70,6 +75,7 @@ private:
     QString m_currentWavPath;
     QString m_lastMeetingDirectory;
     QString m_lastRecordingPath;
+    QString m_lastTranscriptPath;
     bool m_recordingStarted = false;
 };
 #endif // MAINWINDOW_H

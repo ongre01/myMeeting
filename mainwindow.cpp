@@ -7,6 +7,7 @@
 #include <QFile>
 #include <QFileInfo>
 #include <QMediaDevices>
+#include <QSaveFile>
 #include <QStatusBar>
 #include <QTimer>
 
@@ -94,6 +95,12 @@ void MainWindow::initialize()
             this, &MainWindow::stopRecording);
     connect(ui->generateMinutesButton, &QPushButton::clicked,
             this, &MainWindow::startBackendProcessing);
+    connect(ui->saveTranscriptButton, &QPushButton::clicked,
+            this, &MainWindow::saveTranscript);
+    connect(ui->reloadTranscriptButton, &QPushButton::clicked,
+            this, &MainWindow::reloadTranscript);
+    connect(ui->transcriptEdit, &QPlainTextEdit::textChanged,
+            this, &MainWindow::handleTranscriptChanged);
     connect(m_elapsedTimer, &QTimer::timeout,
             this, &MainWindow::updateElapsedTime);
     connect(m_audioRecorder, &AudioRecorder::recordingStarted,
@@ -206,6 +213,8 @@ void MainWindow::handleRecordingStarted()
     m_recordingStarted = true;
     m_lastMeetingDirectory.clear();
     m_lastRecordingPath.clear();
+    m_lastTranscriptPath.clear();
+    ui->transcriptEdit->clear();
     m_elapsedClock.restart();
     m_elapsedTimer->start();
     ui->elapsedTimeLabel->setText(QStringLiteral("00:00:00"));
@@ -284,8 +293,19 @@ void MainWindow::setRecordingControls(bool recording)
     ui->refreshDevicesButton->setEnabled(!recording && !backendRunning);
     ui->startRecordingButton->setEnabled(!recording && !backendRunning && hasDevice);
     ui->stopRecordingButton->setEnabled(recording);
+    const bool hasTranscript = !m_lastTranscriptPath.isEmpty();
+    ui->transcriptEdit->setEnabled(!recording && !backendRunning && hasTranscript);
+    ui->saveTranscriptButton->setEnabled(!recording && !backendRunning && hasTranscript);
+    ui->reloadTranscriptButton->setEnabled(!recording && !backendRunning && hasTranscript);
     ui->generateMinutesButton->setEnabled(
-        !recording && !backendRunning && !m_lastRecordingPath.isEmpty());
+        !recording && !backendRunning
+        && (hasTranscript
+                ? !ui->transcriptEdit->toPlainText().trimmed().isEmpty()
+                : !m_lastRecordingPath.isEmpty()));
+    ui->generateMinutesButton->setText(
+        hasTranscript
+            ? QStringLiteral("수정본으로 다시 분석")
+            : QStringLiteral("AI 회의록 생성"));
 }
 
 void MainWindow::discardUnusedMeeting()
@@ -315,6 +335,25 @@ void MainWindow::startBackendProcessing()
     const QDir meetingDirectory(m_lastMeetingDirectory);
     const QString outputPath = meetingDirectory.filePath(QStringLiteral("meeting.json"));
     const QString transcriptPath = meetingDirectory.filePath(QStringLiteral("transcript.txt"));
+
+    if (!m_lastTranscriptPath.isEmpty()) {
+        if (ui->transcriptEdit->toPlainText().trimmed().isEmpty()) {
+            handleBackendFailed(QStringLiteral("빈 Transcript는 회의록으로 분석할 수 없습니다."));
+            return;
+        }
+
+        QString errorMessage;
+        if (!saveTranscriptToDisk(&errorMessage)) {
+            handleBackendFailed(errorMessage);
+            return;
+        }
+        if (!m_aiBackendClient->analyzeTranscript(m_lastTranscriptPath,
+                                                  outputPath)) {
+            setRecordingControls(false);
+        }
+        return;
+    }
+
     if (!m_aiBackendClient->start(m_lastRecordingPath,
                                   outputPath,
                                   transcriptPath)) {
@@ -359,6 +398,12 @@ void MainWindow::handleBackendStateChanged(AiBackendClient::State state,
 void MainWindow::handleBackendCompleted(const QString &outputPath,
                                         const QString &transcriptPath)
 {
+    QString errorMessage;
+    if (!loadTranscriptFromDisk(transcriptPath, &errorMessage)) {
+        handleBackendFailed(errorMessage);
+        return;
+    }
+
     if (outputPath.isEmpty()) {
         statusBar()->showMessage(
             QStringLiteral("빈 Transcript 저장 완료: %1")
@@ -371,6 +416,37 @@ void MainWindow::handleBackendCompleted(const QString &outputPath,
     setRecordingControls(false);
 }
 
+void MainWindow::saveTranscript()
+{
+    QString errorMessage;
+    if (!saveTranscriptToDisk(&errorMessage)) {
+        handleBackendFailed(errorMessage);
+        return;
+    }
+
+    statusBar()->showMessage(
+        QStringLiteral("Transcript 저장 완료: %1")
+            .arg(QDir::toNativeSeparators(m_lastTranscriptPath)));
+}
+
+void MainWindow::reloadTranscript()
+{
+    QString errorMessage;
+    if (!loadTranscriptFromDisk(m_lastTranscriptPath, &errorMessage)) {
+        handleBackendFailed(errorMessage);
+        return;
+    }
+
+    statusBar()->showMessage(
+        QStringLiteral("Transcript 다시 불러오기 완료: %1")
+            .arg(QDir::toNativeSeparators(m_lastTranscriptPath)));
+}
+
+void MainWindow::handleTranscriptChanged()
+{
+    setRecordingControls(m_audioRecorder->isRecording());
+}
+
 void MainWindow::handleBackendFailed(const QString &message)
 {
     ui->backendStatusLabel->setText(QStringLiteral("Error — 처리 실패"));
@@ -379,4 +455,55 @@ void MainWindow::handleBackendFailed(const QString &message)
     ui->backendProgressBar->setValue(0);
     statusBar()->showMessage(message);
     setRecordingControls(m_audioRecorder->isRecording());
+}
+
+bool MainWindow::saveTranscriptToDisk(QString *errorMessage)
+{
+    if (m_lastTranscriptPath.isEmpty()) {
+        *errorMessage = QStringLiteral("저장할 Transcript 경로가 없습니다.");
+        return false;
+    }
+
+    QSaveFile file(m_lastTranscriptPath);
+    if (!file.open(QIODevice::WriteOnly)) {
+        *errorMessage = QStringLiteral("Transcript 파일을 저장할 수 없습니다: %1")
+                            .arg(QDir::toNativeSeparators(m_lastTranscriptPath));
+        return false;
+    }
+
+    QByteArray contents = ui->transcriptEdit->toPlainText().toUtf8();
+    if (!contents.isEmpty() && !contents.endsWith('\n')) {
+        contents.append('\n');
+    }
+    if (file.write(contents) != contents.size() || !file.commit()) {
+        file.cancelWriting();
+        *errorMessage = QStringLiteral("Transcript 파일을 안전하게 저장할 수 없습니다: %1")
+                            .arg(QDir::toNativeSeparators(m_lastTranscriptPath));
+        return false;
+    }
+    return true;
+}
+
+bool MainWindow::loadTranscriptFromDisk(const QString &path,
+                                        QString *errorMessage)
+{
+    QFile file(path);
+    if (!file.open(QIODevice::ReadOnly)) {
+        *errorMessage = QStringLiteral("Transcript 파일을 읽을 수 없습니다: %1")
+                            .arg(QDir::toNativeSeparators(path));
+        return false;
+    }
+
+    QString transcript = QString::fromUtf8(file.readAll());
+    if (transcript.endsWith(u'\n')) {
+        transcript.chop(1);
+        if (transcript.endsWith(u'\r')) {
+            transcript.chop(1);
+        }
+    }
+
+    m_lastTranscriptPath = QFileInfo(path).absoluteFilePath();
+    ui->transcriptEdit->setPlainText(transcript);
+    setRecordingControls(m_audioRecorder->isRecording());
+    return true;
 }

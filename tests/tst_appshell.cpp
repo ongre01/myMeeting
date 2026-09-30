@@ -8,8 +8,11 @@
 #include <QComboBox>
 #include <QDir>
 #include <QFile>
+#include <QJsonDocument>
+#include <QJsonObject>
 #include <QLabel>
 #include <QLineEdit>
+#include <QPlainTextEdit>
 #include <QPushButton>
 #include <QStandardPaths>
 #include <QStatusBar>
@@ -65,28 +68,39 @@ from pathlib import Path
 import time
 
 parser = argparse.ArgumentParser()
-parser.add_argument("--input", required=True)
+parser.add_argument("--input")
+parser.add_argument("--transcript-input")
 parser.add_argument("--output", required=True)
-parser.add_argument("--transcript-output", required=True)
+parser.add_argument("--transcript-output")
 parser.add_argument("--config")
 parser.add_argument("--progress", action="store_true")
 arguments = parser.parse_args()
 
-if arguments.progress:
-    print(json.dumps({"status": "transcribing"}), flush=True)
-time.sleep(0.25)
-Path(arguments.transcript_output).write_text("테스트 Transcript\n", encoding="utf-8")
+if arguments.input:
+    if arguments.progress:
+        print(json.dumps({"status": "transcribing"}), flush=True)
+    time.sleep(0.25)
+    transcript = "테스트 Transcript"
+    Path(arguments.transcript_output).write_text(transcript + "\n", encoding="utf-8")
+elif arguments.transcript_input:
+    transcript = Path(arguments.transcript_input).read_text(encoding="utf-8").strip()
+else:
+    parser.error("--input or --transcript-input is required")
 if arguments.progress:
     print(json.dumps({"status": "analyzing"}), flush=True)
 Path(arguments.output).write_text(
-    json.dumps({"title": "테스트 회의"}, ensure_ascii=False),
+    json.dumps({"title": "테스트 회의", "transcript": transcript}, ensure_ascii=False),
     encoding="utf-8",
 )
-print(json.dumps({
+result = {
     "status": "completed",
     "output": str(Path(arguments.output).resolve()),
-    "transcript_output": str(Path(arguments.transcript_output).resolve()),
-}), flush=True)
+}
+if arguments.transcript_output:
+    result["transcript_output"] = str(Path(arguments.transcript_output).resolve())
+else:
+    result["transcript_input"] = str(Path(arguments.transcript_input).resolve())
+print(json.dumps(result), flush=True)
 )PY";
 }
 
@@ -203,6 +217,9 @@ private slots:
     void reportsAbnormalBackendExit();
     void rejectsMissingBackendOutput();
     void deliversBackendResultToMainWindow();
+    void savesAndReloadsEditedTranscript();
+    void reanalyzesUsingEditedTranscript();
+    void blocksEmptyTranscriptAnalysis();
 };
 
 void AppShellTest::initTestCase()
@@ -745,6 +762,148 @@ void AppShellTest::deliversBackendResultToMainWindow()
     const QDir meetingDirectory(root.filePath(meetingDirectories.first()));
     QVERIFY(QFileInfo::exists(meetingDirectory.filePath(QStringLiteral("transcript.txt"))));
     QVERIFY(QFileInfo::exists(meetingDirectory.filePath(QStringLiteral("meeting.json"))));
+}
+
+void AppShellTest::savesAndReloadsEditedTranscript()
+{
+    const QString python = pythonExecutable();
+    if (python.isEmpty()) {
+        QSKIP("Python 실행 파일이 없어 Transcript 편집 테스트를 건너뜁니다.");
+    }
+
+    QTemporaryDir temporaryDirectory;
+    QVERIFY(temporaryDirectory.isValid());
+    const QDir root(temporaryDirectory.path());
+    const QString scriptPath = root.filePath(QStringLiteral("fake_backend.py"));
+    QVERIFY(writeTextFile(scriptPath, successfulBackendScript()));
+
+    FakeAudioRecorder recorder;
+    AiBackendClient backendClient(python, scriptPath);
+    MainWindow window(&recorder, &backendClient, temporaryDirectory.path());
+    auto *startButton = window.findChild<QPushButton *>(
+        QStringLiteral("startRecordingButton"));
+    auto *stopButton = window.findChild<QPushButton *>(
+        QStringLiteral("stopRecordingButton"));
+    auto *generateButton = window.findChild<QPushButton *>(
+        QStringLiteral("generateMinutesButton"));
+    auto *transcriptEdit = window.findChild<QPlainTextEdit *>(
+        QStringLiteral("transcriptEdit"));
+    auto *saveButton = window.findChild<QPushButton *>(
+        QStringLiteral("saveTranscriptButton"));
+    auto *reloadButton = window.findChild<QPushButton *>(
+        QStringLiteral("reloadTranscriptButton"));
+    QSignalSpy completedSpy(&backendClient, &AiBackendClient::completed);
+
+    startButton->click();
+    stopButton->click();
+    generateButton->click();
+    QTRY_COMPARE_WITH_TIMEOUT(completedSpy.count(), 1, 5000);
+    QCOMPARE(transcriptEdit->toPlainText(), QStringLiteral("테스트 Transcript"));
+    QVERIFY(transcriptEdit->isEnabled());
+    QVERIFY(saveButton->isEnabled());
+    QVERIFY(reloadButton->isEnabled());
+
+    const QString corrected = QStringLiteral("MC33774 DADD 전문 용어 수정본");
+    transcriptEdit->setPlainText(corrected);
+    saveButton->click();
+
+    const QString transcriptPath = completedSpy.at(0).at(1).toString();
+    QFile transcriptFile(transcriptPath);
+    QVERIFY(transcriptFile.open(QIODevice::ReadOnly));
+    QCOMPARE(QString::fromUtf8(transcriptFile.readAll()), corrected + u'\n');
+    transcriptFile.close();
+
+    transcriptEdit->setPlainText(QStringLiteral("저장하지 않은 변경"));
+    reloadButton->click();
+    QCOMPARE(transcriptEdit->toPlainText(), corrected);
+}
+
+void AppShellTest::reanalyzesUsingEditedTranscript()
+{
+    const QString python = pythonExecutable();
+    if (python.isEmpty()) {
+        QSKIP("Python 실행 파일이 없어 Transcript 재분석 테스트를 건너뜁니다.");
+    }
+
+    QTemporaryDir temporaryDirectory;
+    QVERIFY(temporaryDirectory.isValid());
+    const QDir root(temporaryDirectory.path());
+    const QString scriptPath = root.filePath(QStringLiteral("fake_backend.py"));
+    QVERIFY(writeTextFile(scriptPath, successfulBackendScript()));
+
+    FakeAudioRecorder recorder;
+    AiBackendClient backendClient(python, scriptPath);
+    MainWindow window(&recorder, &backendClient, temporaryDirectory.path());
+    auto *startButton = window.findChild<QPushButton *>(
+        QStringLiteral("startRecordingButton"));
+    auto *stopButton = window.findChild<QPushButton *>(
+        QStringLiteral("stopRecordingButton"));
+    auto *generateButton = window.findChild<QPushButton *>(
+        QStringLiteral("generateMinutesButton"));
+    auto *transcriptEdit = window.findChild<QPlainTextEdit *>(
+        QStringLiteral("transcriptEdit"));
+    QSignalSpy completedSpy(&backendClient, &AiBackendClient::completed);
+
+    startButton->click();
+    stopButton->click();
+    generateButton->click();
+    QTRY_COMPARE_WITH_TIMEOUT(completedSpy.count(), 1, 5000);
+
+    const QString corrected = QStringLiteral("MC33774 수정본으로 재분석");
+    transcriptEdit->setPlainText(corrected);
+    QCOMPARE(generateButton->text(), QStringLiteral("수정본으로 다시 분석"));
+    generateButton->click();
+    QTRY_COMPARE_WITH_TIMEOUT(completedSpy.count(), 2, 5000);
+
+    const QString outputPath = completedSpy.at(1).at(0).toString();
+    QFile outputFile(outputPath);
+    QVERIFY(outputFile.open(QIODevice::ReadOnly));
+    const QJsonDocument output = QJsonDocument::fromJson(outputFile.readAll());
+    QVERIFY(output.isObject());
+    QCOMPARE(output.object().value(QStringLiteral("transcript")).toString(),
+             corrected);
+    QCOMPARE(transcriptEdit->toPlainText(), corrected);
+}
+
+void AppShellTest::blocksEmptyTranscriptAnalysis()
+{
+    const QString python = pythonExecutable();
+    if (python.isEmpty()) {
+        QSKIP("Python 실행 파일이 없어 빈 Transcript 테스트를 건너뜁니다.");
+    }
+
+    QTemporaryDir temporaryDirectory;
+    QVERIFY(temporaryDirectory.isValid());
+    const QDir root(temporaryDirectory.path());
+    const QString scriptPath = root.filePath(QStringLiteral("fake_backend.py"));
+    QVERIFY(writeTextFile(scriptPath, successfulBackendScript()));
+
+    FakeAudioRecorder recorder;
+    AiBackendClient backendClient(python, scriptPath);
+    MainWindow window(&recorder, &backendClient, temporaryDirectory.path());
+    auto *startButton = window.findChild<QPushButton *>(
+        QStringLiteral("startRecordingButton"));
+    auto *stopButton = window.findChild<QPushButton *>(
+        QStringLiteral("stopRecordingButton"));
+    auto *generateButton = window.findChild<QPushButton *>(
+        QStringLiteral("generateMinutesButton"));
+    auto *transcriptEdit = window.findChild<QPlainTextEdit *>(
+        QStringLiteral("transcriptEdit"));
+    auto *backendMessage = window.findChild<QLabel *>(
+        QStringLiteral("backendMessageLabel"));
+    QSignalSpy completedSpy(&backendClient, &AiBackendClient::completed);
+
+    startButton->click();
+    stopButton->click();
+    generateButton->click();
+    QTRY_COMPARE_WITH_TIMEOUT(completedSpy.count(), 1, 5000);
+
+    transcriptEdit->setPlainText(QStringLiteral(" \n\t"));
+    QVERIFY(!generateButton->isEnabled());
+    QVERIFY(QMetaObject::invokeMethod(&window, "startBackendProcessing"));
+    QCOMPARE(completedSpy.count(), 1);
+    QVERIFY(!backendClient.isRunning());
+    QVERIFY(backendMessage->text().contains(QStringLiteral("빈 Transcript")));
 }
 
 QTEST_MAIN(AppShellTest)
