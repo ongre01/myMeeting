@@ -3,6 +3,7 @@
 
 #include "aibackendclient.h"
 #include "audiorecorder.h"
+#include "meetingexporter.h"
 #include "meetingminutes.h"
 #include "meetingstorage.h"
 
@@ -65,6 +66,9 @@ private slots:
     void removeActionItem();
     void addOpenIssue();
     void removeOpenIssue();
+    void exportMarkdownMinutes();
+    void exportTextMinutes();
+    void exportJsonMinutes();
 
 private:
     MainWindow(AudioRecorder *audioRecorder,
@@ -81,6 +85,8 @@ private:
     bool saveTranscriptToDisk(QString *errorMessage);
     bool loadTranscriptFromDisk(const QString &path, QString *errorMessage);
     bool loadMinutesFromDisk(const QString &path, QString *errorMessage);
+    void exportCurrentMinutes(MeetingExporter::Format format);
+    void showExportFailure(const QString &message);
     void populateMinutesEditor();
     void clearMinutesEditor();
     void updateMinutesEmptyStates();
@@ -97,6 +103,7 @@ private:
     QString m_lastMeetingDirectory;
     QString m_lastRecordingPath;
     QString m_lastTranscriptPath;
+    QString m_currentMinutesPath;
     MeetingMinutes m_currentMinutes;
     bool m_recordingStarted = false;
     bool m_hasCurrentMinutes = false;

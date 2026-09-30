@@ -13,6 +13,7 @@ SOURCES += \
     aibackendclient.cpp \
     main.cpp \
     mainwindow.cpp \
+    meetingexporter.cpp \
     meetingminutes.cpp \
     meetingstorage.cpp \
     audiorecorder.cpp \
@@ -21,6 +22,7 @@ SOURCES += \
 HEADERS += \
     aibackendclient.h \
     mainwindow.h \
+    meetingexporter.h \
     meetingminutes.h \
     meetingstorage.h \
     audiorecorder.h \

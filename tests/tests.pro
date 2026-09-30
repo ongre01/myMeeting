@@ -14,6 +14,7 @@ SOURCES += \
     tst_appshell.cpp \
     ../aibackendclient.cpp \
     ../mainwindow.cpp \
+    ../meetingexporter.cpp \
     ../meetingminutes.cpp \
     ../meetingstorage.cpp \
     ../audiorecorder.cpp \
@@ -22,6 +23,7 @@ SOURCES += \
 HEADERS += \
     ../aibackendclient.h \
     ../mainwindow.h \
+    ../meetingexporter.h \
     ../meetingminutes.h \
     ../meetingstorage.h \
     ../audiorecorder.h \

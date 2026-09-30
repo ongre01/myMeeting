@@ -149,6 +149,12 @@ void MainWindow::initialize()
             this, &MainWindow::addOpenIssue);
     connect(ui->removeOpenIssueButton, &QPushButton::clicked,
             this, &MainWindow::removeOpenIssue);
+    connect(ui->exportMarkdownButton, &QPushButton::clicked,
+            this, &MainWindow::exportMarkdownMinutes);
+    connect(ui->exportTextButton, &QPushButton::clicked,
+            this, &MainWindow::exportTextMinutes);
+    connect(ui->exportJsonButton, &QPushButton::clicked,
+            this, &MainWindow::exportJsonMinutes);
     connect(m_elapsedTimer, &QTimer::timeout,
             this, &MainWindow::updateElapsedTime);
     connect(m_audioRecorder, &AudioRecorder::recordingStarted,
@@ -648,6 +654,52 @@ void MainWindow::removeOpenIssue()
     handleMinutesEditorChanged();
 }
 
+void MainWindow::exportMarkdownMinutes()
+{
+    exportCurrentMinutes(MeetingExporter::Format::Markdown);
+}
+
+void MainWindow::exportTextMinutes()
+{
+    exportCurrentMinutes(MeetingExporter::Format::Text);
+}
+
+void MainWindow::exportJsonMinutes()
+{
+    exportCurrentMinutes(MeetingExporter::Format::Json);
+}
+
+void MainWindow::exportCurrentMinutes(MeetingExporter::Format format)
+{
+    if (!m_hasCurrentMinutes || m_currentMinutesPath.isEmpty()) {
+        showExportFailure(QStringLiteral("내보낼 회의록이 없습니다."));
+        return;
+    }
+
+    QString savedPath;
+    QString errorMessage;
+    if (!MeetingExporter::save(m_currentMinutes,
+                               format,
+                               QFileInfo(m_currentMinutesPath).absolutePath(),
+                               &savedPath,
+                               &errorMessage)) {
+        showExportFailure(errorMessage);
+        return;
+    }
+
+    statusBar()->showMessage(
+        QStringLiteral("%1 회의록 저장 완료: %2")
+            .arg(MeetingExporter::displayName(format),
+                 QDir::toNativeSeparators(savedPath)));
+}
+
+void MainWindow::showExportFailure(const QString &message)
+{
+    ui->backendStatusLabel->setText(QStringLiteral("Error — 내보내기 실패"));
+    ui->backendMessageLabel->setText(message);
+    statusBar()->showMessage(message);
+}
+
 void MainWindow::handleBackendFailed(const QString &message)
 {
     ui->backendStatusLabel->setText(QStringLiteral("Error — 처리 실패"));
@@ -728,6 +780,7 @@ bool MainWindow::loadMinutesFromDisk(const QString &path,
     }
 
     m_currentMinutes = minutes;
+    m_currentMinutesPath = QFileInfo(path).absoluteFilePath();
     m_hasCurrentMinutes = true;
     populateMinutesEditor();
     return true;
@@ -783,6 +836,7 @@ void MainWindow::clearMinutesEditor()
 {
     m_populatingMinutesEditor = true;
     m_currentMinutes = MeetingMinutes();
+    m_currentMinutesPath.clear();
     m_hasCurrentMinutes = false;
     ui->minutesTitleEdit->clear();
     ui->minutesDateEdit->clear();
