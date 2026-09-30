@@ -28,6 +28,19 @@ QList<QAudioDevice> AudioRecorder::availableInputDevices()
     return QMediaDevices::audioInputs();
 }
 
+QList<AudioRecorder::InputDeviceInfo> AudioRecorder::inputDevices() const
+{
+    QList<InputDeviceInfo> result;
+    const QList<QAudioDevice> devices = availableInputDevices();
+    result.reserve(devices.size());
+
+    for (const QAudioDevice &device : devices) {
+        result.append({device.id(), device.description()});
+    }
+
+    return result;
+}
+
 QAudioFormat AudioRecorder::supportedRecordingFormat(
     const QAudioDevice &device)
 {
@@ -47,6 +60,31 @@ QAudioFormat AudioRecorder::supportedRecordingFormat(
     }
 
     return {};
+}
+
+bool AudioRecorder::startRecording(const QByteArray &deviceId,
+                                   const QString &filePath)
+{
+    if (m_recording) {
+        emit recordingError(QStringLiteral("이미 녹음 중입니다."));
+        return false;
+    }
+
+    if (deviceId.isEmpty()) {
+        emit recordingError(QStringLiteral("사용할 수 있는 마이크가 선택되지 않았습니다."));
+        return false;
+    }
+
+    const QList<QAudioDevice> devices = availableInputDevices();
+    for (const QAudioDevice &device : devices) {
+        if (device.id() == deviceId) {
+            return startRecording(device, filePath);
+        }
+    }
+
+    emit recordingError(
+        QStringLiteral("선택한 마이크를 더 이상 사용할 수 없습니다. 장치 목록을 새로 고침하세요."));
+    return false;
 }
 
 bool AudioRecorder::startRecording(const QAudioDevice &device,

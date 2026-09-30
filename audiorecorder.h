@@ -3,6 +3,7 @@
 
 #include <QAudioDevice>
 #include <QAudioFormat>
+#include <QByteArray>
 #include <QList>
 #include <QObject>
 #include <QString>
@@ -17,16 +18,26 @@ class AudioRecorder : public QObject
     Q_OBJECT
 
 public:
+    struct InputDeviceInfo
+    {
+        QByteArray id;
+        QString description;
+    };
+
     explicit AudioRecorder(QObject *parent = nullptr);
     ~AudioRecorder() override;
 
     static QList<QAudioDevice> availableInputDevices();
     static QAudioFormat supportedRecordingFormat(const QAudioDevice &device);
 
-    bool startRecording(const QAudioDevice &device, const QString &filePath);
-    void stopRecording();
+    virtual QList<InputDeviceInfo> inputDevices() const;
+    virtual bool startRecording(const QByteArray &deviceId,
+                                const QString &filePath);
+    virtual bool startRecording(const QAudioDevice &device,
+                                const QString &filePath);
+    virtual void stopRecording();
 
-    bool isRecording() const;
+    virtual bool isRecording() const;
     QString filePath() const;
     QAudioFormat format() const;
 
