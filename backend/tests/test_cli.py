@@ -50,6 +50,7 @@ class BackendCliTest(unittest.TestCase):
         self,
         *,
         input_path: Path | None = None,
+        transcript_input_path: Path | None = None,
         output_path: Path | None = None,
         transcript_output_path: Path | None = None,
         config_path: Path | None = None,
@@ -58,13 +59,15 @@ class BackendCliTest(unittest.TestCase):
         command = [
             sys.executable,
             str(MAIN_SCRIPT),
-            "--input",
-            str(input_path or self.input_path),
             "--output",
             str(output_path or self.output_path),
             "--config",
             str(config_path or self.config_path),
         ]
+        if transcript_input_path is not None:
+            command.extend(["--transcript-input", str(transcript_input_path)])
+        else:
+            command.extend(["--input", str(input_path or self.input_path)])
         if transcript_output_path is not None:
             command.extend(["--transcript-output", str(transcript_output_path)])
         return subprocess.run(
@@ -212,9 +215,14 @@ class BackendCliTest(unittest.TestCase):
         fake_package.mkdir()
         (fake_package / "nobodywho.py").write_text(
             """
+import json
+
 class _Stream:
+    def __init__(self, result):
+        self.result = result
+
     def completed(self):
-        return "오늘 CAN FD 통신 문제를 확인하겠습니다."
+        return self.result
 
 class SpeechToText:
     def __init__(self, *, source, language):
@@ -224,7 +232,35 @@ class SpeechToText:
     def transcribe_pcm(self, samples, sample_rate):
         assert samples == [24]
         assert sample_rate == 48000
-        return _Stream()
+        return _Stream("오늘 CAN FD 통신 문제를 확인하겠습니다.")
+
+class SamplerPresets:
+    @staticmethod
+    def constrain_with_json_schema(schema):
+        assert schema["additionalProperties"] is False
+        return "schema-constrained"
+
+class Chat:
+    def __init__(self, source, **kwargs):
+        assert source == "local-llm-model"
+        assert kwargs["sampler"] == "schema-constrained"
+        assert kwargs["template_variables"] == {"enable_thinking": False}
+        assert "Transcript에 없는 사실" in kwargs["system_prompt"]
+
+    def ask(self, prompt):
+        assert "오늘 CAN FD 통신 문제" in prompt
+        return _Stream(json.dumps({
+            "title": "CAN FD 통신 회의",
+            "date": None,
+            "summary": "CAN FD 통신 문제를 확인했다.",
+            "topics": [{
+                "topic": "CAN FD 통신",
+                "discussion": "통신 문제를 확인했다."
+            }],
+            "decisions": [],
+            "action_items": [],
+            "open_issues": ["CAN FD 통신 문제"]
+        }, ensure_ascii=False))
 """.lstrip(),
             encoding="utf-8",
         )
@@ -241,12 +277,131 @@ class SpeechToText:
 
         self.assertEqual(completed.returncode, ExitCode.SUCCESS, completed.stderr)
         response = json.loads(completed.stdout)
-        self.assertEqual(response["status"], "transcribed")
+        self.assertEqual(response["status"], "completed")
         self.assertFalse(response["silence"])
         self.assertEqual(
             transcript_path.read_text(encoding="utf-8"),
             "오늘 CAN FD 통신 문제를 확인하겠습니다.\n",
         )
+        meeting = json.loads(self.output_path.read_text(encoding="utf-8"))
+        self.assertEqual(meeting["title"], "CAN FD 통신 회의")
+        self.assertEqual(meeting["open_issues"], ["CAN FD 통신 문제"])
+
+    def test_edited_transcript_is_analyzed_without_running_stt(self) -> None:
+        transcript_path = self.root / "edited-transcript.txt"
+        transcript_path.write_text(
+            "MC33774 설정은 홍길동 님이 확인합니다. 기한은 정하지 않았습니다.",
+            encoding="utf-8",
+        )
+        fake_package = self.root / "fake-llm-package"
+        fake_package.mkdir()
+        (fake_package / "nobodywho.py").write_text(
+            """
+import json
+
+class _Stream:
+    def completed(self):
+        return json.dumps({
+            "title": "제목 미정",
+            "date": None,
+            "summary": "MC33774 설정 확인을 요청했다.",
+            "topics": [{
+                "topic": "MC33774 설정",
+                "discussion": "설정 확인 작업을 논의했다."
+            }],
+            "decisions": [],
+            "action_items": [{
+                "task": "MC33774 설정 확인",
+                "owner": "홍길동",
+                "due_date": None
+            }],
+            "open_issues": []
+        }, ensure_ascii=False)
+
+class SamplerPresets:
+    @staticmethod
+    def constrain_with_json_schema(schema):
+        return schema
+
+class Chat:
+    def __init__(self, source, **kwargs):
+        assert source == "local-llm-model"
+
+    def ask(self, prompt):
+        assert "MC33774" in prompt
+        return _Stream()
+""".lstrip(),
+            encoding="utf-8",
+        )
+        environment = os.environ.copy()
+        environment["PYTHONPATH"] = os.pathsep.join(
+            filter(None, (str(fake_package), environment.get("PYTHONPATH")))
+        )
+
+        completed = self._run_cli(
+            transcript_input_path=transcript_path,
+            environment=environment,
+        )
+
+        self.assertEqual(completed.returncode, ExitCode.SUCCESS, completed.stderr)
+        response = json.loads(completed.stdout)
+        self.assertEqual(response["status"], "completed")
+        self.assertEqual(Path(response["transcript_input"]), transcript_path)
+        minutes = json.loads(self.output_path.read_text(encoding="utf-8"))
+        self.assertEqual(minutes["action_items"][0]["owner"], "홍길동")
+        self.assertIsNone(minutes["action_items"][0]["due_date"])
+
+    def test_invalid_llm_json_returns_runtime_error_and_preserves_output(self) -> None:
+        transcript_path = self.root / "edited-transcript.txt"
+        transcript_path.write_text("회의 내용을 분석합니다.", encoding="utf-8")
+        original = b"existing validated meeting"
+        self.output_path.write_bytes(original)
+        fake_package = self.root / "invalid-llm-package"
+        fake_package.mkdir()
+        (fake_package / "nobodywho.py").write_text(
+            """
+class _Stream:
+    def completed(self):
+        return "{not valid json"
+
+class SamplerPresets:
+    @staticmethod
+    def constrain_with_json_schema(schema):
+        return schema
+
+class Chat:
+    def __init__(self, source, **kwargs):
+        pass
+
+    def ask(self, prompt):
+        return _Stream()
+""".lstrip(),
+            encoding="utf-8",
+        )
+        environment = os.environ.copy()
+        environment["PYTHONPATH"] = os.pathsep.join(
+            filter(None, (str(fake_package), environment.get("PYTHONPATH")))
+        )
+
+        completed = self._run_cli(
+            transcript_input_path=transcript_path,
+            environment=environment,
+        )
+
+        self.assertEqual(completed.returncode, ExitCode.RUNTIME_ERROR)
+        self.assertIn("JSON 형식 또는 회의록 스키마", completed.stderr)
+        self.assertNotIn("Traceback", completed.stderr)
+        self.assertEqual(self.output_path.read_bytes(), original)
+
+    def test_empty_edited_transcript_returns_input_error(self) -> None:
+        transcript_path = self.root / "empty-transcript.txt"
+        transcript_path.write_text(" \n", encoding="utf-8")
+
+        completed = self._run_cli(transcript_input_path=transcript_path)
+
+        self.assertEqual(completed.returncode, ExitCode.INPUT_ERROR)
+        self.assertIn("빈 Transcript", completed.stderr)
+        self.assertFalse(self.output_path.exists())
 
     def test_model_loading_error_returns_runtime_error_without_traceback(self) -> None:
         with wave.open(str(self.input_path), "wb") as wav_file:

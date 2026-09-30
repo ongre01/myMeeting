@@ -1,5 +1,7 @@
 # TICKET-006 NobodyWho Whisper 음성 인식 구현
 
+> 현재 CLI는 후속 TICKET-008 구현까지 연결되어 비무음 WAV를 STT한 뒤 Local LLM 분석과 `meeting.json` 저장도 수행한다. 아래 내용은 TICKET-006에서 추가한 STT 단계의 동작을 설명한다.
+
 ## 구현 범위
 
 - `backend/stt.py`에 PCM WAV 검증, mono 16-bit 정규화, NobodyWho Whisper 호출, UTF-8 Transcript 저장을 구현했다.
@@ -41,13 +43,13 @@ python backend\main.py `
     --output meetings\meeting.json
 ```
 
-`--output`은 후속 로컬 LLM 단계가 생성할 `meeting.json` 경로다. TICKET-006에서는 이 파일을 만들거나 변경하지 않고, 같은 폴더의 `transcript.txt`를 기본 Transcript 경로로 사용한다. 경로를 직접 지정하려면 다음 인수를 추가한다.
+`--output`은 로컬 LLM 단계가 생성할 `meeting.json` 경로다. 같은 폴더의 `transcript.txt`를 기본 Transcript 경로로 사용한다. 경로를 직접 지정하려면 다음 인수를 추가한다.
 
 ```powershell
 --transcript-output meetings\2026-09-30_103000\transcript.txt
 ```
 
-성공 시 표준 출력에 다음 형태의 한 줄 JSON을 기록한다.
+TICKET-006 단계의 STT 성공 결과는 표준 출력에 다음 형태의 한 줄 JSON을 기록한다. 현재 비무음 전체 CLI 성공 결과는 TICKET-008 문서의 `status: "completed"` 형식을 사용한다.
 
 ```json
 {

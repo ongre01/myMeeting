@@ -1,6 +1,5 @@
 {
   "stt_model": "hf://onnx-community/whisper-base",
-  "llm_model": "hf:NobodyWho/Qwen_Qwen3-0.6B-GGUF:Q4_K_M",
+  "llm_model": "huggingface:NobodyWho/Qwen_Qwen3-0.6B-GGUF/Qwen_Qwen3-0.6B-Q4_K_M.gguf",
   "language": "ko"
 }
-

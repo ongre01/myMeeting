@@ -15,6 +15,17 @@ if __package__ in {None, ""}:
 
 from backend.configuration import ConfigurationError, ModelConfiguration
 from backend.configuration import load_model_configuration
+from backend.summarizer import (
+    LlmDependencyError,
+    LlmInferenceError,
+    LlmModelLoadError,
+    LlmResponseValidationError,
+    MinutesWriteError,
+    TranscriptInputError,
+    analyze_transcript,
+    read_transcript,
+    write_meeting_minutes,
+)
 from backend.stt import (
     ModelLoadError,
     SttDependencyError,
@@ -54,9 +65,16 @@ def default_config_path() -> Path:
 
 def build_argument_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        description="NobodyWho Whisper로 로컬 WAV를 Transcript로 변환합니다."
+        description=(
+            "NobodyWho로 로컬 WAV 또는 편집된 Transcript를 분석해 "
+            "meeting.json을 생성합니다."
+        )
     )
-    parser.add_argument("--input", required=True, type=Path, help="입력 WAV 경로")
+    input_group = parser.add_mutually_exclusive_group(required=True)
+    input_group.add_argument("--input", type=Path, help="입력 WAV 경로")
+    input_group.add_argument(
+        "--transcript-input", type=Path, help="분석할 편집된 Transcript TXT 경로"
+    )
     parser.add_argument("--output", required=True, type=Path, help="출력 JSON 경로")
     parser.add_argument(
         "--config",
@@ -193,6 +211,34 @@ def validate_transcript_output_path(path: Path) -> Path:
     return transcript_path
 
 
+def validate_transcript_input_path(path: Path) -> Path:
+    transcript_path = _absolute_path(path, "Transcript 입력", ExitCode.INPUT_ERROR)
+    if transcript_path.suffix.lower() != ".txt":
+        raise CliValidationError(
+            ExitCode.INPUT_ERROR,
+            f"Transcript 입력 파일은 TXT 형식이어야 합니다: {transcript_path}",
+        )
+    if not transcript_path.exists():
+        raise CliValidationError(
+            ExitCode.INPUT_ERROR,
+            f"Transcript 입력 파일을 찾을 수 없습니다: {transcript_path}",
+        )
+    if not transcript_path.is_file():
+        raise CliValidationError(
+            ExitCode.INPUT_ERROR,
+            f"Transcript 입력 경로가 파일이 아닙니다: {transcript_path}",
+        )
+    try:
+        with transcript_path.open("rb") as transcript_file:
+            transcript_file.read(0)
+    except OSError as error:
+        raise CliValidationError(
+            ExitCode.INPUT_ERROR,
+            f"Transcript 입력 파일을 읽을 수 없습니다: {transcript_path} ({error})",
+        ) from error
+    return transcript_path
+
+
 def validate_configuration_path(path: Path) -> tuple[Path, ModelConfiguration]:
     config_path = _absolute_path(path, "설정", ExitCode.CONFIGURATION_ERROR)
     try:
@@ -228,47 +274,119 @@ def main(argv: Sequence[str] | None = None) -> int:
     arguments = build_argument_parser().parse_args(argv)
 
     try:
-        input_path = validate_input_path(arguments.input)
         output_path = validate_output_path(arguments.output)
         config_path, configuration = validate_configuration_path(arguments.config)
-        requested_transcript_path = (
-            arguments.transcript_output
-            if arguments.transcript_output is not None
-            else output_path.with_name("transcript.txt")
-        )
-        transcript_path = validate_transcript_output_path(requested_transcript_path)
+        if arguments.input is not None:
+            input_path = validate_input_path(arguments.input)
+            requested_transcript_path = (
+                arguments.transcript_output
+                if arguments.transcript_output is not None
+                else output_path.with_name("transcript.txt")
+            )
+            transcript_path = validate_transcript_output_path(
+                requested_transcript_path
+            )
+            transcript_input_path = None
+        else:
+            if arguments.transcript_output is not None:
+                raise CliValidationError(
+                    ExitCode.USAGE_ERROR,
+                    "--transcript-output은 --input WAV와 함께만 사용할 수 있습니다.",
+                )
+            input_path = None
+            transcript_path = None
+            transcript_input_path = validate_transcript_input_path(
+                arguments.transcript_input
+            )
     except CliValidationError as error:
         print(f"오류: {error}", file=sys.stderr)
         return int(error.exit_code)
 
+    if input_path is not None:
+        try:
+            transcription = transcribe_wav(
+                input_path,
+                model_source=configuration.stt_model,
+                language=configuration.language,
+            )
+            assert transcript_path is not None
+            write_transcript(transcript_path, transcription.text)
+        except WavInputError as error:
+            print(f"오류: {error}", file=sys.stderr)
+            return int(ExitCode.INPUT_ERROR)
+        except TranscriptWriteError as error:
+            print(f"오류: {error}", file=sys.stderr)
+            return int(ExitCode.OUTPUT_ERROR)
+        except (SttDependencyError, ModelLoadError, TranscriptionError) as error:
+            print(f"오류: {error}", file=sys.stderr)
+            return int(ExitCode.RUNTIME_ERROR)
+
+        transcript = transcription.text
+        if not transcript.strip():
+            result = {
+                "status": "transcribed",
+                "input": str(input_path),
+                "output": str(output_path),
+                "transcript_output": str(transcript_path),
+                "config": str(config_path),
+                "language": configuration.language,
+                "characters": 0,
+                "audio_duration_seconds": round(
+                    transcription.audio.duration_seconds, 3
+                ),
+                "silence": transcription.skipped_silence,
+            }
+            print(json.dumps(result, ensure_ascii=False))
+            return int(ExitCode.SUCCESS)
+    else:
+        assert transcript_input_path is not None
+        try:
+            transcript = read_transcript(transcript_input_path)
+        except TranscriptInputError as error:
+            print(f"오류: {error}", file=sys.stderr)
+            return int(ExitCode.INPUT_ERROR)
+
     try:
-        transcription = transcribe_wav(
-            input_path,
-            model_source=configuration.stt_model,
-            language=configuration.language,
+        minutes = analyze_transcript(
+            transcript,
+            model_source=configuration.llm_model,
         )
-        write_transcript(transcript_path, transcription.text)
-    except WavInputError as error:
+        write_meeting_minutes(output_path, minutes)
+    except TranscriptInputError as error:
         print(f"오류: {error}", file=sys.stderr)
         return int(ExitCode.INPUT_ERROR)
-    except TranscriptWriteError as error:
+    except MinutesWriteError as error:
         print(f"오류: {error}", file=sys.stderr)
         return int(ExitCode.OUTPUT_ERROR)
-    except (SttDependencyError, ModelLoadError, TranscriptionError) as error:
+    except (
+        LlmDependencyError,
+        LlmModelLoadError,
+        LlmInferenceError,
+        LlmResponseValidationError,
+    ) as error:
         print(f"오류: {error}", file=sys.stderr)
         return int(ExitCode.RUNTIME_ERROR)
 
     result = {
-        "status": "transcribed",
-        "input": str(input_path),
+        "status": "completed",
         "output": str(output_path),
-        "transcript_output": str(transcript_path),
         "config": str(config_path),
         "language": configuration.language,
-        "characters": len(transcription.text),
-        "audio_duration_seconds": round(transcription.audio.duration_seconds, 3),
-        "silence": transcription.skipped_silence,
+        "characters": len(transcript),
     }
+    if input_path is not None:
+        result.update(
+            {
+                "input": str(input_path),
+                "transcript_output": str(transcript_path),
+                "audio_duration_seconds": round(
+                    transcription.audio.duration_seconds, 3
+                ),
+                "silence": transcription.skipped_silence,
+            }
+        )
+    else:
+        result["transcript_input"] = str(transcript_input_path)
     print(json.dumps(result, ensure_ascii=False))
     return int(ExitCode.SUCCESS)
 

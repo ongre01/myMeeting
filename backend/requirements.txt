@@ -1,4 +1,4 @@
-# NobodyWho 3.0 provides the local SpeechToText/Whisper ONNX runtime used here.
+# NobodyWho 3.0 provides local Whisper STT and GGUF Chat inference.
 nobodywho==3.0.0
 
 # Pydantic validates the structured JSON produced by the local LLM.
