@@ -1,2 +1,5 @@
 # NobodyWho 3.0 provides the local SpeechToText/Whisper ONNX runtime used here.
 nobodywho==3.0.0
+
+# Pydantic validates the structured JSON produced by the local LLM.
+pydantic==2.12.5
