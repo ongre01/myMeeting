@@ -3,6 +3,7 @@
 
 #include "aibackendclient.h"
 #include "audiorecorder.h"
+#include "meetingminutes.h"
 #include "meetingstorage.h"
 
 #include <QElapsedTimer>
@@ -32,6 +33,12 @@ public:
                QWidget *parent = nullptr);
     ~MainWindow() override;
 
+    bool hasCurrentMinutes() const;
+    const MeetingMinutes &currentMinutes() const;
+
+signals:
+    void minutesChanged();
+
 private slots:
     void refreshInputDevices();
     void startRecording();
@@ -49,6 +56,15 @@ private slots:
     void handleBackendCompleted(const QString &outputPath,
                                 const QString &transcriptPath);
     void handleBackendFailed(const QString &message);
+    void handleMinutesEditorChanged();
+    void addTopic();
+    void removeTopic();
+    void addDecision();
+    void removeDecision();
+    void addActionItem();
+    void removeActionItem();
+    void addOpenIssue();
+    void removeOpenIssue();
 
 private:
     MainWindow(AudioRecorder *audioRecorder,
@@ -64,6 +80,11 @@ private:
     void discardUnusedMeeting();
     bool saveTranscriptToDisk(QString *errorMessage);
     bool loadTranscriptFromDisk(const QString &path, QString *errorMessage);
+    bool loadMinutesFromDisk(const QString &path, QString *errorMessage);
+    void populateMinutesEditor();
+    void clearMinutesEditor();
+    void updateMinutesEmptyStates();
+    void setMinutesEditorEnabled(bool enabled);
 
     Ui::MainWindow *ui;
     AudioRecorder *m_audioRecorder;
@@ -76,6 +97,9 @@ private:
     QString m_lastMeetingDirectory;
     QString m_lastRecordingPath;
     QString m_lastTranscriptPath;
+    MeetingMinutes m_currentMinutes;
     bool m_recordingStarted = false;
+    bool m_hasCurrentMinutes = false;
+    bool m_populatingMinutesEditor = false;
 };
 #endif // MAINWINDOW_H

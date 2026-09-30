@@ -8,15 +8,19 @@
 #include <QComboBox>
 #include <QDir>
 #include <QFile>
+#include <QGroupBox>
+#include <QJsonArray>
 #include <QJsonDocument>
 #include <QJsonObject>
 #include <QLabel>
 #include <QLineEdit>
+#include <QListWidget>
 #include <QPlainTextEdit>
 #include <QPushButton>
 #include <QStandardPaths>
 #include <QStatusBar>
 #include <QTemporaryDir>
+#include <QTableWidget>
 #include <QtEndian>
 #include <QtTest>
 
@@ -89,7 +93,15 @@ else:
 if arguments.progress:
     print(json.dumps({"status": "analyzing"}), flush=True)
 Path(arguments.output).write_text(
-    json.dumps({"title": "테스트 회의", "transcript": transcript}, ensure_ascii=False),
+    json.dumps({
+        "title": "테스트 회의",
+        "date": None,
+        "summary": transcript,
+        "topics": [{"topic": "기술 검토", "discussion": transcript}],
+        "decisions": ["설정을 재검증한다."],
+        "action_items": [{"task": "설정 확인", "owner": "담당자", "due_date": None}],
+        "open_issues": ["원인 분석 필요"],
+    }, ensure_ascii=False),
     encoding="utf-8",
 )
 result = {
@@ -220,6 +232,9 @@ private slots:
     void savesAndReloadsEditedTranscript();
     void reanalyzesUsingEditedTranscript();
     void blocksEmptyTranscriptAnalysis();
+    void displaysAndSynchronizesMeetingMinutes();
+    void supportsEmptyMeetingMinutesLists();
+    void rejectsInvalidMeetingMinutesJson();
 };
 
 void AppShellTest::initTestCase()
@@ -860,7 +875,7 @@ void AppShellTest::reanalyzesUsingEditedTranscript()
     QVERIFY(outputFile.open(QIODevice::ReadOnly));
     const QJsonDocument output = QJsonDocument::fromJson(outputFile.readAll());
     QVERIFY(output.isObject());
-    QCOMPARE(output.object().value(QStringLiteral("transcript")).toString(),
+    QCOMPARE(output.object().value(QStringLiteral("summary")).toString(),
              corrected);
     QCOMPARE(transcriptEdit->toPlainText(), corrected);
 }
@@ -904,6 +919,157 @@ void AppShellTest::blocksEmptyTranscriptAnalysis()
     QCOMPARE(completedSpy.count(), 1);
     QVERIFY(!backendClient.isRunning());
     QVERIFY(backendMessage->text().contains(QStringLiteral("빈 Transcript")));
+}
+
+void AppShellTest::displaysAndSynchronizesMeetingMinutes()
+{
+    QTemporaryDir temporaryDirectory;
+    QVERIFY(temporaryDirectory.isValid());
+    const QDir directory(temporaryDirectory.path());
+    const QString transcriptPath = directory.filePath(QStringLiteral("transcript.txt"));
+    const QString minutesPath = directory.filePath(QStringLiteral("meeting.json"));
+    QVERIFY(writeTextFile(transcriptPath, QByteArrayLiteral("local transcript\n")));
+
+    QJsonObject minutes{
+        {QStringLiteral("title"), QStringLiteral("BMS 개발 회의")},
+        {QStringLiteral("date"), QStringLiteral("2026-09-30")},
+        {QStringLiteral("summary"), QStringLiteral("초기 요약")},
+        {QStringLiteral("topics"), QJsonArray{QJsonObject{
+             {QStringLiteral("topic"), QStringLiteral("CAN FD")},
+             {QStringLiteral("discussion"), QStringLiteral("통신 설정 검토")}}}},
+        {QStringLiteral("decisions"), QJsonArray{QStringLiteral("재검증한다.")}},
+        {QStringLiteral("action_items"), QJsonArray{QJsonObject{
+             {QStringLiteral("task"), QStringLiteral("설정 확인")},
+             {QStringLiteral("owner"), QStringLiteral("유제환")},
+             {QStringLiteral("due_date"), QStringLiteral("2026-10-02")}}}},
+        {QStringLiteral("open_issues"), QJsonArray{QStringLiteral("응답 누락")}},
+    };
+    QVERIFY(writeTextFile(minutesPath, QJsonDocument(minutes).toJson()));
+
+    FakeAudioRecorder recorder;
+    MainWindow window(&recorder, temporaryDirectory.path());
+    QSignalSpy minutesChangedSpy(&window, &MainWindow::minutesChanged);
+    QVERIFY(QMetaObject::invokeMethod(
+        &window, "handleBackendCompleted", Qt::DirectConnection,
+        Q_ARG(QString, minutesPath), Q_ARG(QString, transcriptPath)));
+
+    QVERIFY(window.hasCurrentMinutes());
+    auto *editorGroup = window.findChild<QGroupBox *>(
+        QStringLiteral("minutesEditorGroup"));
+    auto *titleEdit = window.findChild<QLineEdit *>(QStringLiteral("minutesTitleEdit"));
+    auto *dateEdit = window.findChild<QLineEdit *>(QStringLiteral("minutesDateEdit"));
+    auto *summaryEdit = window.findChild<QPlainTextEdit *>(
+        QStringLiteral("minutesSummaryEdit"));
+    auto *topics = window.findChild<QTableWidget *>(
+        QStringLiteral("topicsTableWidget"));
+    auto *decisions = window.findChild<QListWidget *>(
+        QStringLiteral("decisionsListWidget"));
+    auto *actionItems = window.findChild<QTableWidget *>(
+        QStringLiteral("actionItemsTableWidget"));
+    auto *openIssues = window.findChild<QListWidget *>(
+        QStringLiteral("openIssuesListWidget"));
+
+    QVERIFY(editorGroup->isEnabled());
+    QCOMPARE(titleEdit->text(), QStringLiteral("BMS 개발 회의"));
+    QCOMPARE(dateEdit->text(), QStringLiteral("2026-09-30"));
+    QCOMPARE(summaryEdit->toPlainText(), QStringLiteral("초기 요약"));
+    QCOMPARE(topics->rowCount(), 1);
+    QCOMPARE(decisions->count(), 1);
+    QCOMPARE(actionItems->rowCount(), 1);
+    QCOMPARE(openIssues->count(), 1);
+
+    titleEdit->setText(QStringLiteral("수정된 회의"));
+    dateEdit->clear();
+    summaryEdit->setPlainText(QStringLiteral("수정된 요약"));
+    topics->item(0, 0)->setText(QStringLiteral("수정된 주제"));
+    topics->item(0, 1)->setText(QStringLiteral("수정된 논의"));
+    decisions->item(0)->setText(QStringLiteral("수정된 결정"));
+    actionItems->item(0, 0)->setText(QStringLiteral("수정된 작업"));
+    actionItems->item(0, 1)->setText(QStringLiteral("새 담당자"));
+    actionItems->item(0, 2)->setText(QString());
+    openIssues->item(0)->setText(QStringLiteral("수정된 이슈"));
+
+    const MeetingMinutes &updated = window.currentMinutes();
+    QCOMPARE(updated.title, QStringLiteral("수정된 회의"));
+    QVERIFY(!updated.date.has_value());
+    QCOMPARE(updated.summary, QStringLiteral("수정된 요약"));
+    QCOMPARE(updated.topics.first().topic, QStringLiteral("수정된 주제"));
+    QCOMPARE(updated.topics.first().discussion, QStringLiteral("수정된 논의"));
+    QCOMPARE(updated.decisions.first(), QStringLiteral("수정된 결정"));
+    QCOMPARE(updated.actionItems.first().task, QStringLiteral("수정된 작업"));
+    QCOMPARE(updated.actionItems.first().owner.value(), QStringLiteral("새 담당자"));
+    QVERIFY(!updated.actionItems.first().dueDate.has_value());
+    QCOMPARE(updated.openIssues.first(), QStringLiteral("수정된 이슈"));
+    QVERIFY(minutesChangedSpy.count() >= 9);
+}
+
+void AppShellTest::supportsEmptyMeetingMinutesLists()
+{
+    QTemporaryDir temporaryDirectory;
+    QVERIFY(temporaryDirectory.isValid());
+    const QDir directory(temporaryDirectory.path());
+    const QString transcriptPath = directory.filePath(QStringLiteral("transcript.txt"));
+    const QString minutesPath = directory.filePath(QStringLiteral("meeting.json"));
+    QVERIFY(writeTextFile(transcriptPath, QByteArrayLiteral("local transcript\n")));
+    const QJsonObject minutes{
+        {QStringLiteral("title"), QStringLiteral("빈 목록 회의")},
+        {QStringLiteral("date"), QJsonValue::Null},
+        {QStringLiteral("summary"), QStringLiteral("요약")},
+        {QStringLiteral("topics"), QJsonArray()},
+        {QStringLiteral("decisions"), QJsonArray()},
+        {QStringLiteral("action_items"), QJsonArray()},
+        {QStringLiteral("open_issues"), QJsonArray()},
+    };
+    QVERIFY(writeTextFile(minutesPath, QJsonDocument(minutes).toJson()));
+
+    FakeAudioRecorder recorder;
+    MainWindow window(&recorder, temporaryDirectory.path());
+    QVERIFY(QMetaObject::invokeMethod(
+        &window, "handleBackendCompleted", Qt::DirectConnection,
+        Q_ARG(QString, minutesPath), Q_ARG(QString, transcriptPath)));
+
+    QVERIFY(!window.findChild<QLabel *>(QStringLiteral("topicsEmptyLabel"))->isHidden());
+    QVERIFY(!window.findChild<QLabel *>(QStringLiteral("decisionsEmptyLabel"))->isHidden());
+    QVERIFY(!window.findChild<QLabel *>(QStringLiteral("actionItemsEmptyLabel"))->isHidden());
+    QVERIFY(!window.findChild<QLabel *>(QStringLiteral("openIssuesEmptyLabel"))->isHidden());
+
+    window.findChild<QPushButton *>(QStringLiteral("addTopicButton"))->click();
+    window.findChild<QPushButton *>(QStringLiteral("addDecisionButton"))->click();
+    window.findChild<QPushButton *>(QStringLiteral("addActionItemButton"))->click();
+    window.findChild<QPushButton *>(QStringLiteral("addOpenIssueButton"))->click();
+    QCOMPARE(window.currentMinutes().topics.size(), 1);
+    QCOMPARE(window.currentMinutes().decisions.size(), 1);
+    QCOMPARE(window.currentMinutes().actionItems.size(), 1);
+    QCOMPARE(window.currentMinutes().openIssues.size(), 1);
+    QVERIFY(window.findChild<QLabel *>(QStringLiteral("topicsEmptyLabel"))->isHidden());
+    QVERIFY(window.findChild<QLabel *>(QStringLiteral("decisionsEmptyLabel"))->isHidden());
+    QVERIFY(window.findChild<QLabel *>(QStringLiteral("actionItemsEmptyLabel"))->isHidden());
+    QVERIFY(window.findChild<QLabel *>(QStringLiteral("openIssuesEmptyLabel"))->isHidden());
+}
+
+void AppShellTest::rejectsInvalidMeetingMinutesJson()
+{
+    QTemporaryDir temporaryDirectory;
+    QVERIFY(temporaryDirectory.isValid());
+    const QDir directory(temporaryDirectory.path());
+    const QString transcriptPath = directory.filePath(QStringLiteral("transcript.txt"));
+    const QString minutesPath = directory.filePath(QStringLiteral("meeting.json"));
+    QVERIFY(writeTextFile(transcriptPath, QByteArrayLiteral("local transcript\n")));
+    QVERIFY(writeTextFile(minutesPath, QByteArrayLiteral("{not valid json")));
+
+    FakeAudioRecorder recorder;
+    MainWindow window(&recorder, temporaryDirectory.path());
+    QVERIFY(QMetaObject::invokeMethod(
+        &window, "handleBackendCompleted", Qt::DirectConnection,
+        Q_ARG(QString, minutesPath), Q_ARG(QString, transcriptPath)));
+
+    QVERIFY(!window.hasCurrentMinutes());
+    QCOMPARE(window.findChild<QLabel *>(QStringLiteral("backendStatusLabel"))->text(),
+             QStringLiteral("Error — 처리 실패"));
+    QVERIFY(window.findChild<QLabel *>(QStringLiteral("backendMessageLabel"))
+                ->text().contains(QStringLiteral("JSON")));
+    QVERIFY(!window.findChild<QGroupBox *>(QStringLiteral("minutesEditorGroup"))
+                 ->isEnabled());
 }
 
 QTEST_MAIN(AppShellTest)

@@ -6,9 +6,15 @@
 #include <QDir>
 #include <QFile>
 #include <QFileInfo>
+#include <QHeaderView>
+#include <QLineEdit>
+#include <QListWidget>
 #include <QMediaDevices>
+#include <QPlainTextEdit>
+#include <QPushButton>
 #include <QSaveFile>
 #include <QStatusBar>
+#include <QTableWidget>
 #include <QTimer>
 
 MainWindow::MainWindow(QWidget *parent)
@@ -77,6 +83,16 @@ MainWindow::~MainWindow()
     delete ui;
 }
 
+bool MainWindow::hasCurrentMinutes() const
+{
+    return m_hasCurrentMinutes;
+}
+
+const MeetingMinutes &MainWindow::currentMinutes() const
+{
+    return m_currentMinutes;
+}
+
 QString MainWindow::defaultMeetingsRoot()
 {
     return QDir(QCoreApplication::applicationDirPath())
@@ -86,6 +102,8 @@ QString MainWindow::defaultMeetingsRoot()
 void MainWindow::initialize()
 {
     m_elapsedTimer->setInterval(250);
+    ui->topicsTableWidget->horizontalHeader()->setStretchLastSection(true);
+    ui->actionItemsTableWidget->horizontalHeader()->setStretchLastSection(true);
 
     connect(ui->refreshDevicesButton, &QPushButton::clicked,
             this, &MainWindow::refreshInputDevices);
@@ -101,6 +119,36 @@ void MainWindow::initialize()
             this, &MainWindow::reloadTranscript);
     connect(ui->transcriptEdit, &QPlainTextEdit::textChanged,
             this, &MainWindow::handleTranscriptChanged);
+    connect(ui->minutesTitleEdit, &QLineEdit::textChanged,
+            this, &MainWindow::handleMinutesEditorChanged);
+    connect(ui->minutesDateEdit, &QLineEdit::textChanged,
+            this, &MainWindow::handleMinutesEditorChanged);
+    connect(ui->minutesSummaryEdit, &QPlainTextEdit::textChanged,
+            this, &MainWindow::handleMinutesEditorChanged);
+    connect(ui->topicsTableWidget, &QTableWidget::itemChanged,
+            this, &MainWindow::handleMinutesEditorChanged);
+    connect(ui->decisionsListWidget, &QListWidget::itemChanged,
+            this, &MainWindow::handleMinutesEditorChanged);
+    connect(ui->actionItemsTableWidget, &QTableWidget::itemChanged,
+            this, &MainWindow::handleMinutesEditorChanged);
+    connect(ui->openIssuesListWidget, &QListWidget::itemChanged,
+            this, &MainWindow::handleMinutesEditorChanged);
+    connect(ui->addTopicButton, &QPushButton::clicked,
+            this, &MainWindow::addTopic);
+    connect(ui->removeTopicButton, &QPushButton::clicked,
+            this, &MainWindow::removeTopic);
+    connect(ui->addDecisionButton, &QPushButton::clicked,
+            this, &MainWindow::addDecision);
+    connect(ui->removeDecisionButton, &QPushButton::clicked,
+            this, &MainWindow::removeDecision);
+    connect(ui->addActionItemButton, &QPushButton::clicked,
+            this, &MainWindow::addActionItem);
+    connect(ui->removeActionItemButton, &QPushButton::clicked,
+            this, &MainWindow::removeActionItem);
+    connect(ui->addOpenIssueButton, &QPushButton::clicked,
+            this, &MainWindow::addOpenIssue);
+    connect(ui->removeOpenIssueButton, &QPushButton::clicked,
+            this, &MainWindow::removeOpenIssue);
     connect(m_elapsedTimer, &QTimer::timeout,
             this, &MainWindow::updateElapsedTime);
     connect(m_audioRecorder, &AudioRecorder::recordingStarted,
@@ -123,6 +171,7 @@ void MainWindow::initialize()
     setRecordingControls(false);
     ui->backendProgressBar->setRange(0, 1);
     ui->backendProgressBar->setValue(0);
+    clearMinutesEditor();
     refreshInputDevices();
     statusBar()->showMessage(QStringLiteral("로컬 녹음만 사용합니다."));
 }
@@ -215,6 +264,7 @@ void MainWindow::handleRecordingStarted()
     m_lastRecordingPath.clear();
     m_lastTranscriptPath.clear();
     ui->transcriptEdit->clear();
+    clearMinutesEditor();
     m_elapsedClock.restart();
     m_elapsedTimer->start();
     ui->elapsedTimeLabel->setText(QStringLiteral("00:00:00"));
@@ -306,6 +356,7 @@ void MainWindow::setRecordingControls(bool recording)
         hasTranscript
             ? QStringLiteral("수정본으로 다시 분석")
             : QStringLiteral("AI 회의록 생성"));
+    setMinutesEditorEnabled(!recording && !backendRunning && m_hasCurrentMinutes);
 }
 
 void MainWindow::discardUnusedMeeting()
@@ -399,6 +450,13 @@ void MainWindow::handleBackendCompleted(const QString &outputPath,
                                         const QString &transcriptPath)
 {
     QString errorMessage;
+    if (outputPath.isEmpty()) {
+        clearMinutesEditor();
+    } else if (!loadMinutesFromDisk(outputPath, &errorMessage)) {
+        handleBackendFailed(errorMessage);
+        return;
+    }
+
     if (!loadTranscriptFromDisk(transcriptPath, &errorMessage)) {
         handleBackendFailed(errorMessage);
         return;
@@ -445,6 +503,149 @@ void MainWindow::reloadTranscript()
 void MainWindow::handleTranscriptChanged()
 {
     setRecordingControls(m_audioRecorder->isRecording());
+}
+
+void MainWindow::handleMinutesEditorChanged()
+{
+    if (m_populatingMinutesEditor || !m_hasCurrentMinutes) {
+        return;
+    }
+
+    MeetingMinutes updated;
+    updated.title = ui->minutesTitleEdit->text();
+    if (ui->minutesDateEdit->text().trimmed().isEmpty()) {
+        updated.date.reset();
+    } else {
+        updated.date = ui->minutesDateEdit->text();
+    }
+    updated.summary = ui->minutesSummaryEdit->toPlainText();
+
+    for (int row = 0; row < ui->topicsTableWidget->rowCount(); ++row) {
+        const QTableWidgetItem *topicItem = ui->topicsTableWidget->item(row, 0);
+        const QTableWidgetItem *discussionItem = ui->topicsTableWidget->item(row, 1);
+        updated.topics.append({topicItem ? topicItem->text() : QString(),
+                               discussionItem ? discussionItem->text() : QString()});
+    }
+
+    for (int row = 0; row < ui->decisionsListWidget->count(); ++row) {
+        updated.decisions.append(ui->decisionsListWidget->item(row)->text());
+    }
+
+    for (int row = 0; row < ui->actionItemsTableWidget->rowCount(); ++row) {
+        const QTableWidgetItem *taskItem = ui->actionItemsTableWidget->item(row, 0);
+        const QTableWidgetItem *ownerItem = ui->actionItemsTableWidget->item(row, 1);
+        const QTableWidgetItem *dueDateItem = ui->actionItemsTableWidget->item(row, 2);
+        MeetingActionItem actionItem;
+        actionItem.task = taskItem ? taskItem->text() : QString();
+        if (ownerItem && !ownerItem->text().trimmed().isEmpty()) {
+            actionItem.owner = ownerItem->text();
+        }
+        if (dueDateItem && !dueDateItem->text().trimmed().isEmpty()) {
+            actionItem.dueDate = dueDateItem->text();
+        }
+        updated.actionItems.append(actionItem);
+    }
+
+    for (int row = 0; row < ui->openIssuesListWidget->count(); ++row) {
+        updated.openIssues.append(ui->openIssuesListWidget->item(row)->text());
+    }
+
+    m_currentMinutes = updated;
+    updateMinutesEmptyStates();
+    emit minutesChanged();
+}
+
+void MainWindow::addTopic()
+{
+    if (!m_hasCurrentMinutes) {
+        return;
+    }
+    const int row = ui->topicsTableWidget->rowCount();
+    ui->topicsTableWidget->insertRow(row);
+    ui->topicsTableWidget->setItem(row, 0, new QTableWidgetItem);
+    ui->topicsTableWidget->setItem(row, 1, new QTableWidgetItem);
+    ui->topicsTableWidget->setCurrentCell(row, 0);
+    ui->topicsTableWidget->editItem(ui->topicsTableWidget->item(row, 0));
+    handleMinutesEditorChanged();
+}
+
+void MainWindow::removeTopic()
+{
+    const int row = ui->topicsTableWidget->currentRow();
+    if (!m_hasCurrentMinutes || row < 0) {
+        return;
+    }
+    ui->topicsTableWidget->removeRow(row);
+    handleMinutesEditorChanged();
+}
+
+void MainWindow::addDecision()
+{
+    if (!m_hasCurrentMinutes) {
+        return;
+    }
+    auto *item = new QListWidgetItem(ui->decisionsListWidget);
+    item->setFlags(item->flags() | Qt::ItemIsEditable);
+    ui->decisionsListWidget->setCurrentItem(item);
+    ui->decisionsListWidget->editItem(item);
+    handleMinutesEditorChanged();
+}
+
+void MainWindow::removeDecision()
+{
+    const int row = ui->decisionsListWidget->currentRow();
+    if (!m_hasCurrentMinutes || row < 0) {
+        return;
+    }
+    delete ui->decisionsListWidget->takeItem(row);
+    handleMinutesEditorChanged();
+}
+
+void MainWindow::addActionItem()
+{
+    if (!m_hasCurrentMinutes) {
+        return;
+    }
+    const int row = ui->actionItemsTableWidget->rowCount();
+    ui->actionItemsTableWidget->insertRow(row);
+    for (int column = 0; column < 3; ++column) {
+        ui->actionItemsTableWidget->setItem(row, column, new QTableWidgetItem);
+    }
+    ui->actionItemsTableWidget->setCurrentCell(row, 0);
+    ui->actionItemsTableWidget->editItem(ui->actionItemsTableWidget->item(row, 0));
+    handleMinutesEditorChanged();
+}
+
+void MainWindow::removeActionItem()
+{
+    const int row = ui->actionItemsTableWidget->currentRow();
+    if (!m_hasCurrentMinutes || row < 0) {
+        return;
+    }
+    ui->actionItemsTableWidget->removeRow(row);
+    handleMinutesEditorChanged();
+}
+
+void MainWindow::addOpenIssue()
+{
+    if (!m_hasCurrentMinutes) {
+        return;
+    }
+    auto *item = new QListWidgetItem(ui->openIssuesListWidget);
+    item->setFlags(item->flags() | Qt::ItemIsEditable);
+    ui->openIssuesListWidget->setCurrentItem(item);
+    ui->openIssuesListWidget->editItem(item);
+    handleMinutesEditorChanged();
+}
+
+void MainWindow::removeOpenIssue()
+{
+    const int row = ui->openIssuesListWidget->currentRow();
+    if (!m_hasCurrentMinutes || row < 0) {
+        return;
+    }
+    delete ui->openIssuesListWidget->takeItem(row);
+    handleMinutesEditorChanged();
 }
 
 void MainWindow::handleBackendFailed(const QString &message)
@@ -506,4 +707,105 @@ bool MainWindow::loadTranscriptFromDisk(const QString &path,
     ui->transcriptEdit->setPlainText(transcript);
     setRecordingControls(m_audioRecorder->isRecording());
     return true;
+}
+
+bool MainWindow::loadMinutesFromDisk(const QString &path,
+                                     QString *errorMessage)
+{
+    QFile file(path);
+    if (!file.open(QIODevice::ReadOnly)) {
+        *errorMessage = QStringLiteral("회의록 파일을 읽을 수 없습니다: %1")
+                            .arg(QDir::toNativeSeparators(path));
+        return false;
+    }
+
+    MeetingMinutes minutes;
+    QString validationError;
+    if (!MeetingMinutes::fromJson(file.readAll(), &minutes, &validationError)) {
+        *errorMessage = QStringLiteral("회의록을 불러올 수 없습니다: %1")
+                            .arg(validationError);
+        return false;
+    }
+
+    m_currentMinutes = minutes;
+    m_hasCurrentMinutes = true;
+    populateMinutesEditor();
+    return true;
+}
+
+void MainWindow::populateMinutesEditor()
+{
+    m_populatingMinutesEditor = true;
+
+    ui->minutesTitleEdit->setText(m_currentMinutes.title);
+    ui->minutesDateEdit->setText(m_currentMinutes.date.value_or(QString()));
+    ui->minutesSummaryEdit->setPlainText(m_currentMinutes.summary);
+
+    ui->topicsTableWidget->setRowCount(0);
+    for (const DiscussionTopic &topic : m_currentMinutes.topics) {
+        const int row = ui->topicsTableWidget->rowCount();
+        ui->topicsTableWidget->insertRow(row);
+        ui->topicsTableWidget->setItem(row, 0, new QTableWidgetItem(topic.topic));
+        ui->topicsTableWidget->setItem(row, 1, new QTableWidgetItem(topic.discussion));
+    }
+
+    ui->decisionsListWidget->clear();
+    for (const QString &decision : m_currentMinutes.decisions) {
+        auto *item = new QListWidgetItem(decision, ui->decisionsListWidget);
+        item->setFlags(item->flags() | Qt::ItemIsEditable);
+    }
+
+    ui->actionItemsTableWidget->setRowCount(0);
+    for (const MeetingActionItem &actionItem : m_currentMinutes.actionItems) {
+        const int row = ui->actionItemsTableWidget->rowCount();
+        ui->actionItemsTableWidget->insertRow(row);
+        ui->actionItemsTableWidget->setItem(row, 0,
+                                            new QTableWidgetItem(actionItem.task));
+        ui->actionItemsTableWidget->setItem(
+            row, 1, new QTableWidgetItem(actionItem.owner.value_or(QString())));
+        ui->actionItemsTableWidget->setItem(
+            row, 2, new QTableWidgetItem(actionItem.dueDate.value_or(QString())));
+    }
+
+    ui->openIssuesListWidget->clear();
+    for (const QString &issue : m_currentMinutes.openIssues) {
+        auto *item = new QListWidgetItem(issue, ui->openIssuesListWidget);
+        item->setFlags(item->flags() | Qt::ItemIsEditable);
+    }
+
+    m_populatingMinutesEditor = false;
+    updateMinutesEmptyStates();
+    setMinutesEditorEnabled(!m_audioRecorder->isRecording()
+                            && !m_aiBackendClient->isRunning());
+}
+
+void MainWindow::clearMinutesEditor()
+{
+    m_populatingMinutesEditor = true;
+    m_currentMinutes = MeetingMinutes();
+    m_hasCurrentMinutes = false;
+    ui->minutesTitleEdit->clear();
+    ui->minutesDateEdit->clear();
+    ui->minutesSummaryEdit->clear();
+    ui->topicsTableWidget->setRowCount(0);
+    ui->decisionsListWidget->clear();
+    ui->actionItemsTableWidget->setRowCount(0);
+    ui->openIssuesListWidget->clear();
+    m_populatingMinutesEditor = false;
+    updateMinutesEmptyStates();
+    setMinutesEditorEnabled(false);
+}
+
+void MainWindow::updateMinutesEmptyStates()
+{
+    ui->topicsEmptyLabel->setVisible(ui->topicsTableWidget->rowCount() == 0);
+    ui->decisionsEmptyLabel->setVisible(ui->decisionsListWidget->count() == 0);
+    ui->actionItemsEmptyLabel->setVisible(
+        ui->actionItemsTableWidget->rowCount() == 0);
+    ui->openIssuesEmptyLabel->setVisible(ui->openIssuesListWidget->count() == 0);
+}
+
+void MainWindow::setMinutesEditorEnabled(bool enabled)
+{
+    ui->minutesEditorGroup->setEnabled(enabled && m_hasCurrentMinutes);
 }
